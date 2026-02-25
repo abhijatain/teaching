@@ -1,13 +1,12 @@
 import { defineConfig, defineDocs } from "fumadocs-mdx/config";
 import { metaSchema, pageSchema } from "fumadocs-core/source/schema";
 import { remarkCodeHike, recmaCodeHike } from "codehike/mdx";
+import { remarkMdxMermaid } from "fumadocs-core/mdx-plugins";
 
 const chConfig = {
   components: { code: "Code" },
 };
 
-// You can customise Zod schemas for frontmatter and `meta.json` here
-// see https://fumadocs.dev/docs/mdx/collections
 export const docs = defineDocs({
   dir: "content/docs",
   docs: {
@@ -23,7 +22,10 @@ export const docs = defineDocs({
 
 export default defineConfig({
   mdxOptions: {
-    remarkPlugins: [[remarkCodeHike, chConfig]],
+    remarkPlugins: [
+      remarkMdxMermaid, // ← must be FIRST
+      [remarkCodeHike, chConfig], // ← runs after, won't touch mermaid blocks
+    ],
     recmaPlugins: [[recmaCodeHike, chConfig]],
   },
 });

@@ -8,6 +8,7 @@ import { diff } from "@/components/annotations/diff";
 import { lineNumbers } from "@/components/annotations/line-numbers";
 import { CopyButton } from "@/components/annotations/copy-button";
 import { wordWrap } from "@/components/annotations/word-wrap";
+import { Mermaid } from "@/components/mdx/mermaid";
 
 async function Code({ codeblock }: { codeblock: RawCode }) {
   const highlighted = await highlight(codeblock, "github-dark");
@@ -23,6 +24,7 @@ export function getMDXComponents(components?: MDXComponents): MDXComponents {
   return {
     ...defaultMdxComponents,
     Code,
+    Mermaid,
     ...components,
   };
 }
