@@ -1,0 +1,463 @@
+---
+title: Basic Routes and Filtering
+description: Add GET by ID and introduce simple filters.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+# Basic Routes and Filtering
+
+Now that our data model is solid, let's add ways to query it.
+
+## The Current Problem
+
+Right now, `/matches` returns **everything**:
+
+```bash
+curl http://localhost:8000/matches
+```
+
+Returns all 2 matches. But what if you have 10,000 matches? You'd send megabytes of data when the user only wants 3 results.
+
+**Filters solve this.** Instead of returning everything and letting the client filter, we filter on the server.
+
+---
+
+## Add More Sample Data
+
+First, let's add more matches so filtering is meaningful. Replace your `INITIAL_DATA` with this fuller dataset:
+
+```python title="matches.py"
+INITIAL_DATA: List[Match] = [  # !mark
+    Match(
+        id=1,
+        home_team="Arsenal",
+        away_team="Chelsea",
+        sport=Sport.football,
+        date=date(2025, 10, 21),
+        status=Status.completed,
+        winner=Winner.draw,
+        venue="Emirates Stadium",
+    ),
+    Match(
+        id=2,
+        home_team="Lakers",
+        away_team="Warriors",
+        sport=Sport.basketball,
+        date=date(2025, 11, 15),
+        status=Status.completed,
+        winner=Winner.home_team,
+        venue="Crypto.com Arena",
+    ),
+    Match(
+        id=3,
+        home_team="Real Madrid",
+        away_team="Barcelona",
+        sport=Sport.football,
+        date=date(2026, 4, 10),
+        status=Status.completed,
+        winner=Winner.draw,
+        venue="Santiago Bernabéu",
+    ),
+    Match(
+        id=4,
+        home_team="Knicks",
+        away_team="Celtics",
+        sport=Sport.basketball,
+        date=date(2026, 3, 5),
+        status=Status.upcoming,
+        winner=None,
+        venue="Madison Square Garden",
+    ),
+    Match(
+        id=5,
+        home_team="Yankees",
+        away_team="Red Sox",
+        sport=Sport.baseball,
+        date=date(2025, 8, 10),
+        status=Status.abandoned,
+        winner=None,
+        venue="Yankee Stadium",
+    ),
+    Match(
+        id=6,
+        home_team="India",
+        away_team="Pakistan",
+        sport=Sport.cricket,
+        date=date(2026, 3, 24),
+        status=Status.completed,
+        winner=Winner.home_team,
+        venue="Narendra Modi Stadium",
+    ),
+    Match(
+        id=7,
+        home_team="Lakers",
+        away_team="Warriors",
+        sport=Sport.basketball,
+        date=date(2025, 1, 15),
+        status=Status.completed,
+        winner=Winner.away_team,
+        venue="Crypto.com Arena",
+    ),
+]
+```
+
+Now we have a useful spread: 3 football matches, 3 basketball, 1 baseball, 1 cricket — and a mix of statuses (completed, upcoming, abandoned).
+
+---
+
+## Route 1: Get Match by ID
+
+Let's add a route to get a single match by its ID:
+
+```python title="matches.py"
+@app.get("/matches/{match_id}", tags=["Matches"])  # !mark
+def get_match_by_id(match_id: int):  # !mark
+    for match in INITIAL_DATA:
+        if match.id == match_id:
+            return match
+    return {"error": "Match not found"}
+```
+
+<Callout type="info" title="Path Parameters">
+  `{match_id}` in the route is a **path parameter** — it captures a variable segment from the URL. FastAPI reads the name inside the braces, looks for a matching function argument, and passes the value in.
+
+  Because you typed `match_id: int`, FastAPI also automatically converts the URL string to an integer. If someone visits `/matches/abc`, FastAPI rejects it before your function even runs.
+</Callout>
+
+Try it:
+
+```bash
+# Returns the Arsenal vs Chelsea match
+curl http://localhost:8000/matches/1
+```
+
+```bash
+# Returns an error object
+curl http://localhost:8000/matches/999
+```
+
+---
+
+## Route 2: Filter by Status
+
+Now let's add filtering. The simplest filter is by status. The key insight: **any function parameter that isn't a path parameter becomes a query parameter automatically**.
+
+```python title="matches.py"
+@app.get("/matches", tags=["Matches"])
+def list_matches(
+    status: Optional[Status] = None,   # !mark
+):
+    matches = INITIAL_DATA
+
+    if status:  # !mark
+        matches = [m for m in matches if m.status == status]  # !mark
+
+    return matches
+```
+
+<Callout type="info" title="Query Parameters">
+  When you add parameters to the function that don't appear in the route path, FastAPI treats them as **query parameters** — the `?key=value` part of the URL. Users can now call:
+
+  ```
+  /matches?status=completed
+  /matches?status=upcoming
+  /matches                    # status=None, returns all
+  ```
+</Callout>
+
+<Callout type="info" title="What is a list comprehension?">
+  `[m for m in matches if m.status == status]` is Python's **list comprehension** syntax. It's a compact way to filter a list. Reading it aloud: "give me `m`, for each `m` in `matches`, but only if `m.status` equals `status`." It's equivalent to a for-loop that builds a new list.
+</Callout>
+
+Try it:
+
+```bash
+# Returns only the 5 completed matches
+curl "http://localhost:8000/matches?status=completed"
+```
+
+```bash
+# Returns only the 1 upcoming match
+curl "http://localhost:8000/matches?status=upcoming"
+```
+
+---
+
+## Route 3: Filter by Sport
+
+Let's add another filter. Notice how we **chain** filters — each one narrows the results further:
+
+```python title="matches.py"
+@app.get("/matches", tags=["Matches"])
+def list_matches(
+    status: Optional[Status] = None,
+    sport: Optional[Sport] = None,  # !mark
+):
+    matches = INITIAL_DATA
+
+    if status:
+        matches = [m for m in matches if m.status == status]
+
+    if sport:  # !mark
+        matches = [m for m in matches if m.sport == sport]  # !mark
+
+    return matches
+```
+
+<Callout type="info" title="Why chain filters like this?">
+  We apply filters **one by one**, each narrowing the previous result. The order matters for readability — put cheaper/common filters first. Each `if` block only runs when the user actually provides that filter, so unused filters have zero cost.
+</Callout>
+
+Try combining filters:
+
+```bash
+# Returns 2 matches (Lakers vs Warriors games that finished)
+curl "http://localhost:8000/matches?sport=basketball&status=completed"
+```
+
+<Callout type="info" title="Composable Filters">
+  Each filter is independent. You can use them alone or combine them freely. This is the power of query parameters — users mix and match to get exactly what they need.
+</Callout>
+
+---
+
+## Route 4: Filter by Winner
+
+```python title="matches.py"
+@app.get("/matches", tags=["Matches"])
+def list_matches(
+    status: Optional[Status] = None,
+    sport: Optional[Sport] = None,
+    winner: Optional[Winner] = None,  # !mark
+):
+    matches = INITIAL_DATA
+
+    if status:
+        matches = [m for m in matches if m.status == status]
+
+    if sport:
+        matches = [m for m in matches if m.sport == sport]
+
+    if winner:  # !mark
+        matches = [m for m in matches if m.winner == winner]  # !mark
+
+    return matches
+```
+
+Try it:
+
+```bash
+# Returns matches where the home team won
+curl "http://localhost:8000/matches?winner=home_team"
+```
+
+But there's a problem lurking here...
+
+---
+
+## The Problem with Winner Filter
+
+Try this:
+
+```bash
+curl "http://localhost:8000/matches?status=upcoming&winner=draw"
+```
+
+The API returns **an empty list**. That's technically correct output, but it's a **logical impossibility**:
+
+<Callout type="error" title="Impossible Query">
+  An **upcoming** match can't have a **winner** — the game hasn't been played yet. These two filters contradict each other. The API should **reject** this query with an error, not silently return an empty list.
+
+  Returning `[]` is misleading — the user might think "there are just no draws in upcoming matches," when the real answer is "that combination is nonsensical."
+</Callout>
+
+---
+
+## Types vs Logic
+
+Here's the key distinction we keep seeing:
+
+| What Pydantic Validates | What We Must Validate |
+|------------------------|----------------------|
+| `status` is a valid Status enum | `status=upcoming` can't be used with `winner` |
+| `winner` is a valid Winner enum | `winner` only makes sense if `status=completed` |
+| `date` is a real date | `date` shouldn't be in the past for upcoming matches |
+
+<Callout type="warn" title="Pydantic's Limits">
+  Pydantic validates **individual values**. It doesn't know about **relationships between values**. You have to write that logic yourself.
+</Callout>
+
+---
+
+## Add Logical Validation
+
+Let's add a check at the start of the function. If the combination is impossible, we return an error immediately — before wasting time filtering:
+
+```python title="matches.py"
+@app.get("/matches", tags=["Matches"])
+def list_matches(
+    status: Optional[Status] = None,
+    sport: Optional[Sport] = None,
+    winner: Optional[Winner] = None,
+):
+    # Logical validation — catch impossible combinations first
+    if winner and status and status != Status.completed:  # !mark
+        return {"error": "winner filter only works with status=completed"}  # !mark
+
+    matches = INITIAL_DATA
+
+    if status:
+        matches = [m for m in matches if m.status == status]
+
+    if sport:
+        matches = [m for m in matches if m.sport == sport]
+
+    if winner:
+        matches = [m for m in matches if m.winner == winner]
+
+    return matches
+```
+
+<Callout type="info" title="Reading the validation condition">
+  `if winner and status and status != Status.completed` means: "the user provided both a `winner` filter AND a `status` filter, and that status is NOT completed."
+
+  It only fires when all three conditions are true simultaneously. If either `winner` or `status` is `None` (not provided), the check is skipped entirely.
+</Callout>
+
+Now try:
+
+```bash
+curl "http://localhost:8000/matches?status=upcoming&winner=draw"
+```
+
+Returns:
+
+```json
+{
+  "error": "winner filter only works with status=completed"
+}
+```
+
+<Callout type="info" title="Business Logic Validation">
+  We caught the contradiction. The API now **fails fast** with a clear error instead of returning confusing empty results. This is a key API design principle: be explicit about what's wrong.
+</Callout>
+
+---
+
+## Current State
+
+Here's everything we have so far, assembled in one place:
+
+```python title="matches.py"
+from datetime import date
+from enum import Enum
+from typing import List, Optional
+
+from fastapi import FastAPI
+from pydantic import BaseModel
+
+app = FastAPI(title="Sports Matches API")
+
+
+# -------------------- ENUMS --------------------
+
+class Sport(str, Enum):
+    football = "football"
+    cricket = "cricket"
+    hockey = "hockey"
+    basketball = "basketball"
+    baseball = "baseball"
+
+
+class Status(str, Enum):
+    upcoming = "upcoming"
+    cancelled = "cancelled"
+    abandoned = "abandoned"
+    completed = "completed"
+
+
+class Winner(str, Enum):
+    home_team = "home_team"
+    away_team = "away_team"
+    draw = "draw"
+
+
+# -------------------- MODELS --------------------
+
+class Match(BaseModel):
+    id: int
+    home_team: str
+    away_team: str
+    sport: Sport
+    date: date
+    status: Status
+    winner: Optional[Winner] = None
+    venue: Optional[str] = None
+
+
+# -------------------- DATA --------------------
+
+INITIAL_DATA: List[Match] = [
+    # ... all 7 matches ...
+]
+
+
+# -------------------- ROUTES --------------------
+
+@app.get("/health", tags=["System"])
+def health_check():
+    return {"status": "ok"}
+
+
+@app.get("/matches", tags=["Matches"])
+def list_matches(
+    status: Optional[Status] = None,
+    sport: Optional[Sport] = None,
+    winner: Optional[Winner] = None,
+):
+    if winner and status and status != Status.completed:
+        return {"error": "winner filter only works with status=completed"}
+
+    matches = INITIAL_DATA
+
+    if status:
+        matches = [m for m in matches if m.status == status]
+
+    if sport:
+        matches = [m for m in matches if m.sport == sport]
+
+    if winner:
+        matches = [m for m in matches if m.winner == winner]
+
+    return matches
+
+
+@app.get("/matches/{match_id}", tags=["Matches"])
+def get_match_by_id(match_id: int):
+    for match in INITIAL_DATA:
+        if match.id == match_id:
+            return match
+    return {"error": "Match not found"}
+
+
+@app.post("/matches", tags=["Matches"])
+def create_match(match: Match):
+    INITIAL_DATA.append(match)
+    return match
+```
+
+<Callout type="info" title="Code organisation tip">
+  The comments like `# ---- ENUMS ----` are section separators — they're just Python comments but help readers scan the file at a glance. As a file grows, this kind of structure prevents it from feeling like a wall of code.
+</Callout>
+
+---
+
+## What's Next
+
+We've added basic filters, but we're missing some powerful ones:
+
+1. **Date filtering** — "matches after March 1st"
+2. **Team filtering** — "all Arsenal matches" or "Arsenal wins only"
+
+These are more complex because they need **secondary filters** to be useful. We'll tackle those next.

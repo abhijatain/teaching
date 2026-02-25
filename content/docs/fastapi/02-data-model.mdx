@@ -1,0 +1,486 @@
+---
+title: Designing the Data Model
+description: Start with strings, discover the problems, then fix them step by step.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+# Designing the Data Model
+
+You're the API designer. Let's figure out what a "match" actually is.
+
+## What Information Do We Need?
+
+A sports match needs:
+
+- **Teams** — who's playing?
+- **Sport** — football, basketball, cricket?
+- **Date** — when does it happen?
+- **Status** — upcoming, completed, cancelled?
+- **Winner** — who won? (if completed)
+- **Venue** — where is it?
+
+<Callout type="info" title="Design Principle">
+  Start with the **minimum required fields**, then add optional ones. Don't include fields you don't need yet. Adding a field later is easy. Removing one that developers already depend on is very hard.
+</Callout>
+
+---
+
+## Version 1: Everything is a String
+
+Let's start with the simplest possible approach — make everything a string:
+
+```python title="matches.py"
+from typing import List, Optional
+from fastapi import FastAPI
+from pydantic import BaseModel
+app = FastAPI(title="Sports Matches API")  # !mark[/BaseModel/]
+
+class Match(BaseModel):  # !mark[/BaseModel/]
+    id: int
+    home_team: str
+    away_team: str
+    sport: str
+    date: str
+    status: str
+    winner: Optional[str] = None
+    venue: Optional[str] = None
+
+
+# Sample data
+INITIAL_DATA: List[Match] = [
+    Match(
+        id=1,
+        home_team="Arsenal",
+        away_team="Chelsea",
+        sport="football",
+        date="2025-10-21",
+        status="completed",
+        winner="draw",
+        venue="Emirates Stadium",
+    ),
+    Match(
+        id=2,
+        home_team="Lakers",
+        away_team="Warriors",
+        sport="basketball",
+        date="2025-11-15",
+        status="completed",
+        winner="home_team",
+        venue="Crypto.com Arena",
+    ),
+]
+
+
+@app.get("/health", tags=["System"])
+def health_check():
+    return {"status": "ok"}
+
+
+@app.get("/matches", tags=["Matches"])
+def list_matches():
+    return INITIAL_DATA
+```
+
+<Callout type="info" title="What is BaseModel?">
+  `BaseModel` comes from **Pydantic**, a library FastAPI uses under the hood. When your class inherits from `BaseModel`, Pydantic automatically validates incoming data and converts it to the correct types. Think of it as a smart data container with built-in checking.
+</Callout>
+
+<Callout type="info" title="What does Optional mean?">
+  `Optional[str] = None` means the field is **not required**. If the user doesn't provide it, it defaults to `None`. This makes sense for `winner` — not every match has a winner yet (upcoming matches don't).
+</Callout>
+
+Run the server and visit `http://localhost:8000/matches`:
+
+```json
+[
+  {
+    "id": 1,
+    "home_team": "Arsenal",
+    "away_team": "Chelsea",
+    "sport": "football",
+    "date": "2025-10-21",
+    "status": "completed",
+    "winner": "draw",
+    "venue": "Emirates Stadium"
+  }
+]
+```
+
+<Callout type="info" title="It works!">
+  The API returns data. Users can read it. Ship it to production, right?
+</Callout>
+
+---
+
+## The Problems Begin
+
+Let's add an endpoint to create matches:
+
+```python title="matches.py"
+@app.get("/matches", tags=["Matches"])
+def list_matches():
+    return INITIAL_DATA
+
+@app.post("/matches", tags=["Matches"])  # !mark
+def create_match(match: Match):  # !mark
+    INITIAL_DATA.append(match)  # !mark
+    return match  # !mark
+```
+
+<Callout type="info" title="What is @app.post?">
+  `@app.post` handles HTTP **POST** requests — the method for **creating** new data. When someone sends a POST request to `/matches` with match data in the request body, FastAPI calls `create_match()` automatically and passes the parsed data as the `match` argument.
+</Callout>
+
+Go to `http://localhost:8000/docs` and try creating a match with this JSON:
+
+```json title="Invalid data that gets accepted 😱"
+{
+  "id": 3,
+  "home_team": "Real Madrid",
+  "away_team": "Barcelona",
+  "sport": "fotball",
+  "date": "tomorrow",
+  "status": "done",
+  "winner": "real madrid"
+}
+```
+
+**It works.** FastAPI accepts it. The data is now in your system.
+
+<Callout type="error" title="But look at what we accepted">
+  - `sport: "fotball"` — typo, should be "football"
+  - `date: "tomorrow"` — not a real date format
+  - `status: "done"` — should be "completed"
+  - `winner: "real madrid"` — should be "home_team"
+
+  Your API just accepted **four pieces of invalid data**. Now other developers will query for `sport=football` and miss this match. Date comparisons will break. Everything is corrupted.
+</Callout>
+
+---
+
+## Why Strings Are Dangerous
+
+When everything is a string, you have **no constraints**. Users can send:
+
+```python title="All of these get accepted — all of them are wrong"
+sport: "soccer"      # Valid in some countries, but your API uses "football"
+sport: "Football"    # Capitalization mismatch
+sport: "⚽"          # Emoji
+sport: "123"         # Number as string
+sport: ""            # Empty string
+```
+
+Every one of these gets stored. Your database fills with garbage. Filtering breaks. You can't trust your own data.
+
+<Callout type="warn" title="String Hell">
+  Strings accept **anything**. That makes them dangerous for fields with limited valid values. You need **constraints**.
+</Callout>
+
+---
+
+## The Solution: Enums
+
+An **enum** (short for *enumeration*) is a fixed set of allowed values. Think of it as a list of the only words the field is allowed to contain. Instead of accepting any string for `sport`, we define exactly 5 options — and anything else is rejected automatically.
+
+Add this before the `Match` class:
+
+```python title="matches.py"
+from enum import Enum  # !mark
+
+
+class Sport(str, Enum):  # !mark[/Sport/]
+    football = "football"
+    cricket = "cricket"
+    hockey = "hockey"
+    basketball = "basketball"
+    baseball = "baseball"
+
+
+class Match(BaseModel):
+    id: int
+    home_team: str
+    away_team: str
+    sport: Sport  # !mark
+    date: str
+    status: str
+    winner: Optional[str] = None
+    venue: Optional[str] = None
+```
+
+<Callout type="info" title="Why class Sport(str, Enum)?">
+  The `(str, Enum)` part means our enum inherits from both `str` and `Enum`. Inheriting from `str` means each enum value **is** a string — so `Sport.football` equals `"football"`. This makes JSON serialization work automatically (FastAPI sends `"football"` in responses, not some weird object).
+</Callout>
+
+Update your sample data:
+
+```python title="matches.py"
+INITIAL_DATA: List[Match] = [
+    Match(
+        id=1,
+        home_team="Arsenal",
+        away_team="Chelsea",
+        sport=Sport.football,  # !mark
+        date="2025-10-21",
+        status="completed",
+        winner="draw",
+        venue="Emirates Stadium",
+    ),
+]
+```
+
+Now try creating a match with `"sport": "fotball"` in the docs UI.
+
+**You get an error**:
+
+```json title="Pydantic validation error"
+{
+  "detail": [
+    {
+      "loc": ["body", "sport"],
+      "msg": "value is not a valid enumeration member; permitted: 'football', 'cricket', 'hockey', 'basketball', 'baseball'",
+      "type": "type_error.enum"
+    }
+  ]
+}
+```
+
+<Callout type="info" title="Pydantic Validation">
+  FastAPI (via Pydantic) **automatically rejects invalid values**. No typos can get through. No guessing. The API tells users exactly what's allowed — they even get the full list of permitted values in the error message.
+</Callout>
+
+---
+
+## Convert More Fields to Enums
+
+Now let's fix `status` and `winner`:
+
+```diff title="matches.py"
+  class Sport(str, Enum):
+      football = "football"
+      cricket = "cricket"
+      hockey = "hockey"
+      basketball = "basketball"
+      baseball = "baseball"
+
++ class Status(str, Enum):
++     upcoming = "upcoming"
++     cancelled = "cancelled"
++     abandoned = "abandoned"
++     completed = "completed"
++
++ class Winner(str, Enum):
++     home_team = "home_team"
++     away_team = "away_team"
++     draw = "draw"
+
+  class Match(BaseModel):
+      id: int
+      home_team: str
+      away_team: str
+      sport: Sport
+      date: str
+-     status: str
++     status: Status
+-     winner: Optional[str] = None
++     winner: Optional[Winner] = None
+      venue: Optional[str] = None
+```
+
+<Callout type="info" title="Reading diff syntax">
+  Lines starting with `+` are **additions** and lines starting with `-` are **removals**. Lines without a prefix stay unchanged. This is standard "diff" notation used in Git and code reviews.
+</Callout>
+
+Update your data to use the enums:
+
+```python title="matches.py"
+Match(
+    id=1,
+    home_team="Arsenal",
+    away_team="Chelsea",
+    sport=Sport.football,
+    date="2025-10-21",
+    status=Status.completed,  # !mark
+    winner=Winner.draw,  # !mark
+    venue="Emirates Stadium",
+)
+```
+
+Now try sending:
+- `"status": "done"` → **rejected** ❌
+- `"winner": "arsenal"` → **rejected** ❌
+
+Only valid enum values get through.
+
+---
+
+## But Dates Are Still Broken
+
+Try creating a match with:
+
+```json
+{
+  "date": "not a date"
+}
+```
+
+**It still works.** Strings accept anything.
+
+Dates need special handling. Python has a built-in `date` type that Pydantic understands:
+
+```diff title="matches.py"
++ from datetime import date
+  from enum import Enum
+  from typing import List, Optional
+
+  from fastapi import FastAPI
+  from pydantic import BaseModel
+
+  # ... enums ...
+
+  class Match(BaseModel):
+      id: int
+      home_team: str
+      away_team: str
+      sport: Sport
+-     date: str
++     date: date  # Python's built-in date type
+      status: Status
+      winner: Optional[Winner] = None
+      venue: Optional[str] = None
+```
+
+Update your data:
+
+```python title="matches.py"
+Match(
+    id=1,
+    home_team="Arsenal",
+    away_team="Chelsea",
+    sport=Sport.football,
+    date=date(2025, 10, 21),  # !mark
+    status=Status.completed,
+    winner=Winner.draw,
+    venue="Emirates Stadium",
+)
+```
+
+Now try these:
+- `"date": "not a date"` → **rejected** ❌
+- `"date": "2025-13-45"` → **rejected** ❌ (month 13 doesn't exist)
+- `"date": "2025-10-21"` → **accepted** ✅
+
+<Callout type="info" title="Pydantic Date Parsing">
+  When you use `date` as the type, Pydantic automatically:
+  1. Accepts ISO 8601 format strings (`"2025-10-21"`)
+  2. Validates they're real calendar dates
+  3. Converts them to Python `date` objects internally
+  4. Rejects anything else with a clear error
+
+  You get date validation **for free** — no custom code needed.
+</Callout>
+
+---
+
+## The Complete Transformation
+
+Here's what changed from Version 1 to Version 2:
+
+```diff title="matches.py - From Strings to Types"
+  from datetime import date
++ from enum import Enum
+  from typing import List, Optional
+
+  from fastapi import FastAPI
+  from pydantic import BaseModel
+
+  app = FastAPI(title="Sports Matches API")
+
++ class Sport(str, Enum):
++     football = "football"
++     cricket = "cricket"
++     hockey = "hockey"
++     basketball = "basketball"
++     baseball = "baseball"
++
++ class Status(str, Enum):
++     upcoming = "upcoming"
++     cancelled = "cancelled"
++     abandoned = "abandoned"
++     completed = "completed"
++
++ class Winner(str, Enum):
++     home_team = "home_team"
++     away_team = "away_team"
++     draw = "draw"
+
+  class Match(BaseModel):
+      id: int
+      home_team: str
+      away_team: str
+-     sport: str
++     sport: Sport
+-     date: str
++     date: date
+-     status: str
++     status: Status
+-     winner: Optional[str] = None
++     winner: Optional[Winner] = None
+      venue: Optional[str] = None
+```
+
+---
+
+## What We Fixed
+
+| Field | Before (str) | After (typed) | What Changed |
+|-------|-------------|---------------|--------------|
+| `sport` | Any string | Enum | Only 5 valid sports |
+| `status` | Any string | Enum | Only 4 valid statuses |
+| `winner` | Any string | Enum | Only 3 valid outcomes |
+| `date` | Any string | date | Only valid dates in ISO 8601 |
+
+<Callout type="info" title="Pydantic Handles This">
+  All this validation happens **automatically**. You didn't write any if-statements or try-catch blocks. You just changed the types, and Pydantic does the rest.
+</Callout>
+
+---
+
+## What Pydantic DOESN'T Handle
+
+But there's still a problem. Try creating this match:
+
+```json title="Logically invalid but type-valid"
+{
+  "id": 99,
+  "home_team": "Arsenal",
+  "away_team": "Arsenal",
+  "sport": "football",
+  "date": "2025-12-25",
+  "status": "upcoming",
+  "winner": "home_team"
+}
+```
+
+**It's accepted.** But look at the logical errors:
+
+1. **Both teams are the same** — Arsenal vs Arsenal 🤔
+2. **Upcoming match has a winner** — the game hasn't happened yet 🤔
+
+<Callout type="warn" title="Type Validation ≠ Logic Validation">
+  Pydantic validates **types** (is this a valid enum? is this a real date?). It does NOT validate **business logic** (does this combination make sense?).
+
+  You have to write that logic yourself. We'll cover this in the POST validation lesson.
+</Callout>
+
+---
+
+## Next Steps
+
+We've fixed the data types, but we still need to:
+
+1. Add **logical validation** (upcoming matches can't have winners)
+2. Add **filtering** (let users query by sport, date, status, etc.)
+3. Handle **filter contradictions** (some filter combinations don't make sense)
+
+In the next lesson, we'll add basic routes and start filtering.

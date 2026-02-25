@@ -1,0 +1,12 @@
+{
+  "title": "Building a FastAPI Filtering System",
+  "description": "Learn FastAPI by building a sports matches API from scratch, starting with strings and progressively adding type safety, validation, and filters.",
+  "pages": [
+    "01-setup",
+    "02-data-model",
+    "03-basic-routes",
+    "04-advanced-filtering",
+    "05-post-validation",
+    "06-review"
+  ]
+}

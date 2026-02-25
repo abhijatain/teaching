@@ -1,0 +1,514 @@
+---
+title: Advanced Filtering
+description: Date comparisons and team-based filters with logical constraints.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+# Advanced Filtering
+
+Simple filters like `?status=completed` are straightforward. But some filters need **modifiers** to be useful.
+
+## The Date Problem
+
+Users want to ask:
+
+- "Matches **after** January 1st"
+- "Matches **before** March"
+- "Matches **on** February 14th"
+
+You could add three separate parameters:
+
+```python title="❌ Bad approach — parameter explosion"
+date_after: Optional[date] = None
+date_before: Optional[date] = None
+date_exact: Optional[date] = None
+```
+
+But that's clunky. What if someone provides both `date_after` and `date_exact`? Which wins? And you'd need similar triples for any field you want to compare.
+
+**Better solution:** One date parameter + one operator parameter.
+
+---
+
+## Date Filtering with Operators
+
+Add a new enum for comparison operators. These operators are the same ones used in database queries and maths: "equals", "greater than", "less than".
+
+```python title="matches.py"
+class Winner(str, Enum):
+    home_team = "home_team"
+    away_team = "away_team"
+    draw = "draw"
+
+
+class DateFilter(str, Enum):  # !mark
+    eq = "eq"  # !mark
+    gt = "gt"  # !mark
+    lt = "lt"  # !mark
+```
+
+Now update the route with two new parameters:
+
+```python title="matches.py"
+@app.get("/matches", tags=["Matches"])
+def list_matches(
+    status: Optional[Status] = None,
+    sport: Optional[Sport] = None,
+    winner: Optional[Winner] = None,
+    match_date: Optional[date] = None,  # !mark
+    date_filter: Optional[DateFilter] = None,  # !mark
+):
+    if winner and status and status != Status.completed:
+        return {"error": "winner filter only works with status=completed"}
+
+    matches = INITIAL_DATA
+
+    if status:
+        matches = [m for m in matches if m.status == status]
+
+    if sport:
+        matches = [m for m in matches if m.sport == sport]
+
+    if winner:
+        matches = [m for m in matches if m.winner == winner]
+
+    if match_date:  # !mark
+        if date_filter == DateFilter.gt:  # !mark
+            matches = [m for m in matches if m.date > match_date]  # !mark
+        elif date_filter == DateFilter.lt:  # !mark
+            matches = [m for m in matches if m.date < match_date]  # !mark
+        else:  # !mark
+            # !mark
+            matches = [m for m in matches if m.date == match_date]  # !mark
+
+    return matches
+```
+
+<Callout type="info" title="Two-Parameter Pattern">
+  `match_date` provides the **value** to compare against. `date_filter` provides the **comparison operator** (`gt`, `lt`, `eq`). This pattern is very common in REST APIs for any field that needs range queries.
+
+  Python's `date` objects support `>`, `<`, and `==` comparisons natively — that's why `m.date > match_date` just works.
+</Callout>
+
+Try it:
+
+```bash title="Matches after January 1, 2026"
+curl "http://localhost:8000/matches?match_date=2026-01-01&date_filter=gt"
+```
+
+Returns Real Madrid vs Barcelona (April 10), Knicks vs Celtics (March 5), and India vs Pakistan (March 24).
+
+```bash title="Matches before January 1, 2026"
+curl "http://localhost:8000/matches?match_date=2026-01-01&date_filter=lt"
+```
+
+Returns all matches from 2025.
+
+```bash title="Exact date match — no operator needed"
+curl "http://localhost:8000/matches?match_date=2025-10-21"
+```
+
+Returns just Arsenal vs Chelsea.
+
+---
+
+## The Team Problem
+
+Users want to search for teams:
+
+- "All matches involving Arsenal"
+- "All Arsenal **wins**"
+- "All Arsenal **losses**"
+- "All Arsenal **draws**"
+
+This needs **two** parameters again:
+
+1. **team_name** — which team to search for
+2. **team_filter** — what outcome to filter by (won/lost/draw/any)
+
+Add the enum:
+
+```python title="matches.py"
+class DateFilter(str, Enum):
+    eq = "eq"
+    gt = "gt"
+    lt = "lt"
+
+
+class TeamFilter(str, Enum):  # !mark
+    won = "won"  # !mark
+    lost = "lost"  # !mark
+    draw = "draw"  # !mark
+```
+
+Add the parameters to the route:
+
+```python title="matches.py"
+@app.get("/matches", tags=["Matches"])
+def list_matches(
+    status: Optional[Status] = None,
+    sport: Optional[Sport] = None,
+    winner: Optional[Winner] = None,
+    match_date: Optional[date] = None,
+    date_filter: Optional[DateFilter] = None,
+    team_name: Optional[str] = None,  # !mark
+    team_filter: Optional[TeamFilter] = None,  # !mark
+):
+```
+
+---
+
+## Team Filtering Logic
+
+Team filtering is the most complex part. We need to handle four cases:
+
+1. **Any match involving the team** (if `team_filter` is None — not provided)
+2. **Team wins** — team was home AND home team won, OR team was away AND away team won
+3. **Team losses** — team was home AND away team won, OR team was away AND home team won
+4. **Team draws** — team was involved AND result was a draw
+
+Add the logic after your other filters:
+
+```python title="matches.py"
+if team_name:
+    team = team_name.lower()  # !mark
+
+    if team_filter is None:
+        # Any match this team was involved in
+        matches = [
+            m for m in matches
+            if team in m.home_team.lower() or team in m.away_team.lower()
+        ]
+
+    elif team_filter == TeamFilter.won:
+        matches = [
+            m for m in matches
+            if (team == m.home_team.lower() and m.winner == Winner.home_team)  # !mark
+            or (team == m.away_team.lower() and m.winner == Winner.away_team)  # !mark
+        ]
+
+    elif team_filter == TeamFilter.lost:
+        matches = [
+            m for m in matches
+            if (team == m.home_team.lower() and m.winner == Winner.away_team)
+            or (team == m.away_team.lower() and m.winner == Winner.home_team)
+        ]
+
+    elif team_filter == TeamFilter.draw:
+        matches = [
+            m for m in matches
+            if (team in m.home_team.lower() or team in m.away_team.lower())
+            and m.winner == Winner.draw
+        ]
+
+return matches
+```
+
+<Callout type="info" title="Case-Insensitive Search">
+  We convert both the search term and the stored names to lowercase using `.lower()` before comparing. This means users can search for `"arsenal"`, `"Arsenal"`, or `"ARSENAL"` and get the same results. Always normalise case when doing text search.
+</Callout>
+
+### Understanding the Win Logic
+
+Let's break down the "won" filter step by step:
+
+```python title="Why this logic works"
+if (team == m.home_team.lower() and m.winner == Winner.home_team):
+    # The team played at home (home_team field)
+    # AND the home team won (winner == home_team)
+    # Example: "lakers" is home_team, winner = home_team → Lakers won ✓
+
+or (team == m.away_team.lower() and m.winner == Winner.away_team):
+    # The team played away (away_team field)
+    # AND the away team won (winner == away_team)
+    # Example: "warriors" is away_team, winner = away_team → Warriors won ✓
+```
+
+<Callout type="info" title="Why not just check winner directly?">
+  The `Winner` enum stores **which side won** (home or away), not **which team** won. So to find "Lakers wins" you need to know: was Lakers playing at home or away in each match? Then check if that side won. You can't just filter `winner=lakers`.
+</Callout>
+
+Try it:
+
+```bash title="All Arsenal matches"
+curl "http://localhost:8000/matches?team_name=arsenal"
+```
+
+```bash title="All Lakers wins"
+curl "http://localhost:8000/matches?team_name=lakers&team_filter=won"
+```
+
+Returns only the November 15 game (Lakers beat Warriors at home).
+
+```bash title="All Lakers losses"
+curl "http://localhost:8000/matches?team_name=lakers&team_filter=lost"
+```
+
+Returns only the January 15 game (Warriors beat Lakers — Warriors were the away team that won).
+
+---
+
+## But There's a Contradiction
+
+Try this:
+
+```bash title="❌ Logically impossible query"
+curl "http://localhost:8000/matches?team_name=arsenal&team_filter=won&winner=draw"
+```
+
+This query asks for:
+- Matches where Arsenal **won** (`team_filter=won`)
+- But the winner is a **draw** (`winner=draw`)
+
+That's impossible. Arsenal can't win a draw.
+
+<Callout type="error" title="Logical Contradiction">
+  `team_filter=won` means one team decisively won. But `winner=draw` means nobody won. These two filters directly contradict each other. We need to block this combination before any filtering runs.
+</Callout>
+
+---
+
+## Blocking Contradictory Filters
+
+Update the validation block at the top of the function:
+
+```python title="matches.py"
+@app.get("/matches", tags=["Matches"])
+def list_matches(
+    status: Optional[Status] = None,
+    sport: Optional[Sport] = None,
+    winner: Optional[Winner] = None,
+    match_date: Optional[date] = None,
+    date_filter: Optional[DateFilter] = None,
+    team_name: Optional[str] = None,
+    team_filter: Optional[TeamFilter] = None,
+):
+    # Validate filter combinations
+    if team_filter and winner:  # !mark
+        return {"error": "team_filter and winner cannot be used together"}  # !mark
+
+    if (team_filter or winner) and status and status != Status.completed:  # !mark
+        return {"error": "team_filter or winner can only be used when status=completed"}  # !mark
+
+    matches = INITIAL_DATA
+    # ... filtering logic ...
+```
+
+Now try:
+
+```bash
+curl "http://localhost:8000/matches?team_name=arsenal&team_filter=won&winner=draw"
+```
+
+```json title="Error response"
+{
+  "error": "team_filter and winner cannot be used together"
+}
+```
+
+<Callout type="info" title="Fail Fast">
+  We detect contradictions **before** filtering. This saves computation and gives users immediate feedback. The pattern is: validate first, then work.
+</Callout>
+
+---
+
+## Another Contradiction
+
+Try this:
+
+```bash title="❌ Also impossible"
+curl "http://localhost:8000/matches?team_name=arsenal&team_filter=won&status=upcoming"
+```
+
+This asks for:
+- Arsenal **wins** (`team_filter=won`)
+- But only **upcoming** matches (`status=upcoming`)
+
+Upcoming matches haven't happened yet — they can't have winners or losers.
+
+The second validation line we added catches this:
+
+```python title="matches.py"
+# (team_filter OR winner) AND status is set AND status is NOT completed
+if (team_filter or winner) and status and status != Status.completed:
+    return {"error": "team_filter or winner can only be used when status=completed"}
+```
+
+<Callout type="info" title="Why this works">
+  `team_filter=won` requires a winner to exist. Winners only exist on completed matches. So combining `team_filter` with anything other than `status=completed` is always invalid — catch it early.
+</Callout>
+
+---
+
+## Filter Compatibility Matrix
+
+Here's which filter combinations are valid:
+
+| Filter Combination | Valid? | Reason |
+|-------------------|--------|----|
+| `status=completed` + `winner=draw` | ✅ | Makes logical sense |
+| `status=upcoming` + `winner=draw` | ❌ | Upcoming can't have winners |
+| `team_filter=won` + `winner=draw` | ❌ | "Won" contradicts "draw" |
+| `team_filter=won` + `status=completed` | ✅ | Makes logical sense |
+| `date_filter=gt` + `match_date=2026-01-01` | ✅ | Makes logical sense |
+| `team_filter=won` + `winner=home_team` | ❌ | Redundant and ambiguous |
+
+---
+
+## Empty Results vs Errors
+
+There's a subtle but important difference between these two outcomes:
+
+### Empty Results (Correct)
+
+```bash title="Valid query, no matches"
+curl "http://localhost:8000/matches?sport=hockey"
+```
+
+Returns `[]` — no hockey matches exist, but the query is **logically valid**. The user should see an empty list.
+
+### Error Response (Correct)
+
+```bash title="Invalid query"
+curl "http://localhost:8000/matches?team_filter=won&status=upcoming"
+```
+
+Returns an error — the query is **logically impossible** regardless of what data exists.
+
+<Callout type="warn" title="Design Principle">
+  Return **empty results** when the query is valid but matches nothing. Return an **error** when the query itself is contradictory. Never return an empty list for an impossible query — that's misleading.
+</Callout>
+
+---
+
+## Improving Empty Results
+
+Right now, a valid query with no matches returns `[]`. That's correct JSON, but not helpful. Let's add a message:
+
+```python title="matches.py"
+    # ... all filtering done ...
+
+    if not matches:  # !mark
+        return {"message": "No matches found for the given filters"}  # !mark
+
+    return matches
+```
+
+Now:
+
+```bash
+curl "http://localhost:8000/matches?sport=hockey"
+```
+
+```json title="Clearer response"
+{
+  "message": "No matches found for the given filters"
+}
+```
+
+---
+
+## Complete Filtering Logic
+
+Here's everything together in the final route:
+
+```python title="matches.py"
+@app.get("/matches", tags=["Matches"])
+def list_matches(
+    status: Optional[Status] = None,
+    sport: Optional[Sport] = None,
+    winner: Optional[Winner] = None,
+    match_date: Optional[date] = None,
+    date_filter: Optional[DateFilter] = None,
+    team_name: Optional[str] = None,
+    team_filter: Optional[TeamFilter] = None,
+):
+    # ── Validate filter combinations ─────────────────
+    if team_filter and winner:
+        return {"error": "team_filter and winner cannot be used together"}
+
+    if (team_filter or winner) and status and status != Status.completed:
+        return {"error": "team_filter or winner can only be used when status=completed"}
+
+    # ── Apply filters ────────────────────────────────
+    matches = INITIAL_DATA
+
+    if status:
+        matches = [m for m in matches if m.status == status]
+
+    if sport:
+        matches = [m for m in matches if m.sport == sport]
+
+    if winner:
+        matches = [m for m in matches if m.winner == winner]
+
+    if match_date:
+        if date_filter == DateFilter.gt:
+            matches = [m for m in matches if m.date > match_date]
+        elif date_filter == DateFilter.lt:
+            matches = [m for m in matches if m.date < match_date]
+        else:
+            matches = [m for m in matches if m.date == match_date]
+
+    if team_name:
+        team = team_name.lower()
+
+        if team_filter is None:
+            matches = [
+                m for m in matches
+                if team in m.home_team.lower() or team in m.away_team.lower()
+            ]
+        elif team_filter == TeamFilter.won:
+            matches = [
+                m for m in matches
+                if (team == m.home_team.lower() and m.winner == Winner.home_team)
+                or (team == m.away_team.lower() and m.winner == Winner.away_team)
+            ]
+        elif team_filter == TeamFilter.lost:
+            matches = [
+                m for m in matches
+                if (team == m.home_team.lower() and m.winner == Winner.away_team)
+                or (team == m.away_team.lower() and m.winner == Winner.home_team)
+            ]
+        elif team_filter == TeamFilter.draw:
+            matches = [
+                m for m in matches
+                if (team in m.home_team.lower() or team in m.away_team.lower())
+                and m.winner == Winner.draw
+            ]
+
+    # ── Return ───────────────────────────────────────
+    if not matches:
+        return {"message": "No matches found for the given filters"}
+
+    return matches
+```
+
+---
+
+## What We Learned
+
+| Problem | Solution |
+|---------|----------|
+| Date comparisons (before/after/exact) | Two parameters: `match_date` + `date_filter` |
+| Team outcome filtering | Two parameters: `team_name` + `team_filter` |
+| Contradictory filters | Validate combinations early, return errors |
+| Empty vs invalid queries | Return message for valid queries, error for invalid ones |
+
+<Callout type="info" title="Pydantic vs Custom Logic">
+  - **Pydantic handles:** type validation (is this a valid enum? a real date?)
+  - **You handle:** logical validation (do these filters contradict each other?)
+</Callout>
+
+---
+
+## What's Next
+
+We still need to add validation to the **POST** endpoint. Right now, you can create matches with:
+
+- `home_team` = `away_team` (same team playing itself)
+- `status=upcoming` but `winner=home_team` (future match already has winner)
+- `date` in the past but `status=upcoming` (upcoming match scheduled for yesterday)
+
+These are logical errors that Pydantic can't catch. We'll fix them next.

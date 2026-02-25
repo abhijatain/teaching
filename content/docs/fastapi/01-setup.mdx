@@ -1,0 +1,155 @@
+---
+title: What We're Building
+description: Problem statement, project setup, and your first FastAPI endpoint.
+---
+
+# What We're Building
+
+Before writing a single line of code, let's understand the problem we're solving.
+
+## The Problem
+
+Imagine you're building a sports app. Users want to ask questions like:
+
+- "Show me all completed football matches"
+- "Did Arsenal win their last game?"
+- "What matches are coming up in March?"
+- "Show me all games where the home team won"
+
+A naive API would return **everything** and make the client filter it. That's wasteful — you'd send hundreds of matches over the network when the user only needs 3.
+
+A good API lets users **filter on the server** using query parameters, so only the relevant data travels across the network.
+
+That's exactly what we're building: a Sports Matches API where every filter is optional, combinable, and validated automatically.
+
+---
+
+## Your Role as the API Designer
+
+<Callout type="warn" title="You're in charge">
+  **You are the API designer.** Hundreds or thousands of developers will use your API. The decisions you make about data types, validation rules, and filter combinations will affect everyone who integrates with your service. Good design prevents bugs before they happen.
+</Callout>
+
+When you design an API, you control:
+
+1. **Data Schema** — What fields exist? What values are allowed?
+2. **Validation** — What happens if someone sends invalid data?
+3. **Filtering Logic** — Which combinations make sense? Which create contradictions?
+4. **Error Messages** — How do users debug their mistakes?
+
+Every choice has consequences. We'll make mistakes intentionally, see the problems they cause, and fix them properly.
+
+---
+
+## What the Final API Can Do
+
+By the end of these lessons, your API will support:
+
+```text
+GET /matches                                          → all matches
+GET /matches?status=completed                         → completed only
+GET /matches?sport=football&status=upcoming           → upcoming football
+GET /matches?team_name=arsenal&team_filter=won        → Arsenal wins only
+GET /matches?match_date=2026-01-01&date_filter=gt     → after Jan 1
+GET /matches/{id}                                     → one specific match
+POST /matches                                         → create a new match
+```
+
+All validation — enum values, date formats, business rules — is handled by FastAPI automatically.
+
+---
+
+## Project Setup
+
+Install [Poetry](https://python-poetry.org/docs/#installation) if you haven't already:
+
+```bash
+curl -sSL https://install.python-poetry.org | python3 -
+```
+
+Create a new project and add dependencies:
+
+```bash
+poetry new sports-api
+cd sports-api
+poetry add fastapi uvicorn
+```
+
+Activate the virtual environment Poetry manages for you:
+
+```bash
+poetry shell
+```
+
+Create `matches.py` inside the project folder:
+
+```bash
+touch matches.py
+```
+
+---
+
+## Your First Endpoint
+
+Open `matches.py` and add:
+
+```python title="matches.py"
+from fastapi import FastAPI
+app = FastAPI(title="Sports Matches API")  # !mark
+
+
+@app.get("/health", tags=["System"])
+def health_check():
+    return {"status": "ok"}
+```
+
+<Callout type="info" title="Line 1 — from fastapi import FastAPI">
+  This pulls in the `FastAPI` class from the package you installed. It is the core of your entire application — responsible for routing, validation, and generating your `/docs` UI. Every other line in this file depends on it.
+</Callout>
+
+<Callout type="info" title="Line 3 — app = FastAPI(...)">
+  This creates your application instance. Think of `app` as the central hub — every request that comes in and every response that goes out flows through it. The `title` argument sets the name shown at the top of the auto-generated docs at `http://localhost:8000/docs`.
+</Callout>
+
+<Callout type="info" title="Line 6 — @app.get('/health', tags=['System'])">
+  This is a **route decorator**. It tells FastAPI: when a `GET` request arrives at the path `/health`, call the function directly below it.
+
+  - `@app.get` handles **HTTP GET** — the method for reading data. Other verbs like `@app.post` and `@app.delete` work the same way.
+  - `"/health"` is the URL path. A request to `http://localhost:8000/health` matches this and triggers `health_check()`.
+  - `tags=["System"]` groups this endpoint under a "System" section in the `/docs` UI.
+</Callout>
+
+<Callout type="info" title="Lines 7–8 — def health_check()">
+  A plain Python function. FastAPI calls it automatically on every matching request. Returning a `dict` is enough — FastAPI serialises it to JSON automatically, so the client receives `{"status": "ok"}`.
+</Callout>
+
+Run the server:
+
+```bash
+poetry run uvicorn matches:app --reload
+```
+
+<Callout type="info" title="Breaking down the uvicorn command">
+  - `uvicorn` — the web server that listens for HTTP connections and passes them to FastAPI.
+  - `matches:app` — `matches` is the filename (`matches.py`) and `app` is the FastAPI instance from line 3.
+  - `--reload` — restarts the server automatically on every file save. Use this in development only.
+  - If you're inside a `poetry shell` session, you can omit the `poetry run` prefix.
+</Callout>
+
+Visit `http://localhost:8000/health` — you should see:
+
+```json
+{ "status": "ok" }
+```
+
+Visit `http://localhost:8000/docs` — FastAPI auto-generates an interactive UI. Every endpoint you add appears here automatically.
+
+<Callout type="info" title="Why /health?">
+  A health check endpoint is standard practice. Load balancers, monitoring tools, and deployment platforms ping this route to verify your server is alive. It should always respond instantly with no database calls.
+</Callout>
+
+---
+
+## What's Next
+
+The server runs but doesn't do anything useful yet. In the next lesson we'll design the data model — starting with the simplest possible approach (everything as strings) and discovering why that's problematic.
