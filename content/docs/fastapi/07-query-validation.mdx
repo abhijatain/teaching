@@ -1,0 +1,623 @@
+---
+title: Query Parameter Validation
+description: Add validation and metadata to query parameters with FastAPI's Query.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+# Query Parameter Validation
+
+Our filtering works, but there's no validation. Users can send anything as query parameters, and we have to handle it in our code. Let's fix that.
+
+## The Problem: No Constraints
+
+Currently, our `/matches` endpoint accepts any string for filters:
+
+```python title="matches.py - Current implementation"
+@app.get("/matches", tags=["Matches"])
+def list_matches(
+    sport: Optional[Sport] = None,
+    status: Optional[Status] = None,
+    team: Optional[str] = None,
+):
+    # ... filtering logic ...
+```
+
+Try these queries:
+
+```bash title="All of these work — but should they?"
+/matches?team=a                    # Single letter
+/matches?team=                     # Empty string
+/matches?team=ThisIsAnExtremelyLongTeamNameThatGoesOnForeverAndEverAndMakesNoSense
+```
+
+<Callout type="warn" title="No Validation = Performance Risk">
+  Without constraints, users can:
+  - Send extremely long strings that slow down filtering
+  - Send empty strings that waste processing time
+  - Repeatedly query with nonsense values that will never match
+
+  Every API needs **reasonable limits** on what it accepts.
+</Callout>
+
+---
+
+## The Solution: Query Parameter Validation
+
+FastAPI provides the `Query` class to add validation and metadata to query parameters. Import it first:
+
+```diff title="matches.py"
+  from datetime import date
+  from enum import Enum
+  from typing import List, Optional
++ from typing import Annotated
+
+- from fastapi import FastAPI
++ from fastapi import FastAPI, Query
+  from pydantic import BaseModel
+
+  # ... rest of code ...
+```
+
+<Callout type="info" title="What is Annotated?">
+  `Annotated` is a special Python type that lets you attach extra information (metadata) to a type. Think of it as adding a sticky note to a type. The type itself (`str`) stays the same, but now it carries additional instructions that FastAPI can read and act on.
+</Callout>
+
+---
+
+## Adding Length Constraints
+
+Let's add a minimum length to the `team` parameter. Nobody searches for single-letter teams:
+
+```python title="matches.py"
+@app.get("/matches", tags=["Matches"])
+def list_matches(
+    sport: Optional[Sport] = None,
+    status: Optional[Status] = None,
+    team: Annotated[Optional[str], Query(min_length=3)] = None,  # !mark
+):
+    # ... filtering logic ...
+```
+
+### Understanding the Syntax
+
+```python title="Breaking down the annotation"
+team: Annotated[Optional[str], Query(min_length=3)] = None
+      ^^^^^^^^^
+      Annotated wraps the type
+
+      Annotated[Optional[str], Query(min_length=3)] = None
+                ^^^^^^^^^^^^
+                The actual type — optional string
+
+      Annotated[Optional[str], Query(min_length=3)] = None
+                               ^^^^^^^^^^^^^^^^^^^
+                               Extra validation rules
+
+      Annotated[Optional[str], Query(min_length=3)] = None
+                                                       ^^^^
+                                                       Default value
+```
+
+Now try:
+
+```bash title="Too short"
+/matches?team=AB
+```
+
+Response:
+
+```json title="Validation error"
+{
+  "detail": [
+    {
+      "loc": ["query", "team"],
+      "msg": "ensure this value has at least 3 characters",
+      "type": "value_error.any_str.min_length",
+      "ctx": {"limit_value": 3}
+    }
+  ]
+}
+```
+
+<Callout type="info" title="Automatic Validation">
+  FastAPI **intercepts** the request before your function runs. Invalid parameters are rejected immediately with a clear error message. Your code never sees the bad data.
+</Callout>
+
+---
+
+## Adding Maximum Length
+
+Now add an upper limit to prevent abuse:
+
+```python title="matches.py"
+@app.get("/matches", tags=["Matches"])
+def list_matches(
+    sport: Optional[Sport] = None,
+    status: Optional[Status] = None,
+    team: Annotated[Optional[str], Query(min_length=3, max_length=50)] = None,  # !mark
+):
+    # ... filtering logic ...
+```
+
+Try this monstrosity:
+
+```bash title="Way too long"
+/matches?team=ThisIsAnAbsurdlyLongTeamNameThatNobodyWouldEverActuallyUseInRealLife
+```
+
+Response:
+
+```json title="Validation error"
+{
+  "detail": [
+    {
+      "loc": ["query", "team"],
+      "msg": "ensure this value has at most 50 characters",
+      "type": "value_error.any_str.max_length",
+      "ctx": {"limit_value": 50}
+    }
+  ]
+}
+```
+
+<Callout type="info" title="Why 50 characters?">
+  Most real team names are under 30 characters. Setting `max_length=50` is generous but prevents abuse. Choose limits based on your data — if your longest real team name is "FC Barcelona Academy Under-19 Development Squad" (46 chars), give yourself some padding but not unlimited room.
+</Callout>
+
+---
+
+## Adding Regex Patterns
+
+What if you want to enforce a specific format? Use `pattern`:
+
+```python title="matches.py - Hypothetical example"
+@app.get("/matches", tags=["Matches"])
+def list_matches(
+    sport: Optional[Sport] = None,
+    status: Optional[Status] = None,
+    team: Annotated[
+        Optional[str], 
+        Query(min_length=3, max_length=50, pattern="^[A-Za-z0-9 ]+$")  # !mark
+    ] = None,
+):
+    # ... filtering logic ...
+```
+
+### Understanding the Pattern
+
+```python title="Regex breakdown"
+pattern="^[A-Za-z0-9 ]+$"
+        ^               $
+        Start           End of string
+        
+         [A-Za-z0-9 ]+
+          ^^^^^^^^^^^
+          Letters, numbers, and spaces only
+          
+         [A-Za-z0-9 ]+
+                     ^
+                     One or more characters
+```
+
+This pattern ensures the team name:
+- Starts with an allowed character (`^`)
+- Contains only letters, numbers, and spaces (`[A-Za-z0-9 ]`)
+- Has at least one character (`+`)
+- Ends properly (`$`)
+
+Try this:
+
+```bash title="Special characters rejected"
+/matches?team=Real$Madrid
+```
+
+Response:
+
+```json title="Validation error"
+{
+  "detail": [
+    {
+      "loc": ["query", "team"],
+      "msg": "string does not match regex \"^[A-Za-z0-9 ]+$\"",
+      "type": "value_error.str.regex"
+    }
+  ]
+}
+```
+
+<Callout type="warn" title="Be Careful with Regex">
+  Regular expressions are powerful but easy to get wrong. The pattern above would **reject** valid team names like "Saint-Étienne" (has a hyphen and accent). Only use regex patterns when you truly need strict format enforcement — for most cases, `min_length` and `max_length` are enough.
+</Callout>
+
+---
+
+## Making Parameters Required
+
+Right now all our query parameters are optional. What if you want to require one?
+
+Simply **remove the default value**:
+
+```python title="matches.py - Require team parameter"
+@app.get("/matches", tags=["Matches"])
+def list_matches(
+    sport: Optional[Sport] = None,
+    status: Optional[Status] = None,
+    team: Annotated[str, Query(min_length=3, max_length=50)],  # !mark (no default value)
+):
+    # ... filtering logic ...
+```
+
+Notice the changes:
+1. `Optional[str]` became `str` — it's no longer optional
+2. `= None` was removed — no default value
+
+Try accessing `/matches` without the `team` parameter:
+
+```json title="Validation error"
+{
+  "detail": [
+    {
+      "loc": ["query", "team"],
+      "msg": "field required",
+      "type": "value_error.missing"
+    }
+  ]
+}
+```
+
+<Callout type="info" title="When to Require Parameters">
+  Generally, query parameters should be **optional** — they're for filtering, and users might want to see all results. Required parameters are better suited for path parameters (like `/matches/{id}`). However, if a specific endpoint only makes sense with certain filters, requiring them is valid.
+</Callout>
+
+---
+
+## Adding Documentation Metadata
+
+You can add `title` and `description` to your parameters. These appear in the auto-generated docs:
+
+```python title="matches.py"
+@app.get("/matches", tags=["Matches"])
+def list_matches(
+    sport: Optional[Sport] = None,
+    status: Optional[Status] = None,
+    team: Annotated[
+        Optional[str],
+        Query(
+            min_length=3,
+            max_length=50,
+            title="Team Name",  # !mark
+            description="Filter by team name (home or away). Partial matches supported.",  # !mark
+        ),
+    ] = None,
+):
+    # ... filtering logic ...
+```
+
+Visit `http://localhost:8000/docs` and look at the `/matches` endpoint. The `team` parameter now has a title and helpful description visible to users.
+
+<Callout type="info" title="Self-Documenting APIs">
+  Good documentation makes your API easier to use. The `title` and `description` appear in:
+  - The interactive docs (`/docs`)
+  - The OpenAPI schema (`/openapi.json`)
+  - Auto-generated client libraries
+  
+  Write them as if explaining to a new developer who's never seen your API before.
+</Callout>
+
+---
+
+## Deprecating Parameters
+
+Let's say you're replacing the `team` parameter with separate `home_team` and `away_team` filters. Mark the old parameter as deprecated:
+
+```python title="matches.py"
+@app.get("/matches", tags=["Matches"])
+def list_matches(
+    sport: Optional[Sport] = None,
+    status: Optional[Status] = None,
+    team: Annotated[
+        Optional[str],
+        Query(
+            min_length=3,
+            max_length=50,
+            deprecated=True,  # !mark
+        ),
+    ] = None,
+    home_team: Annotated[Optional[str], Query(min_length=3, max_length=50)] = None,
+    away_team: Annotated[Optional[str], Query(min_length=3, max_length=50)] = None,
+):
+    # ... filtering logic ...
+```
+
+In the docs, `team` now appears with a strikethrough and a "Deprecated" label. Users see it still works but know they should migrate to the new parameters.
+
+<Callout type="warn" title="Breaking Changes">
+  Never **remove** a parameter without warning. The deprecation workflow is:
+  1. Add the new parameters
+  2. Mark the old one as `deprecated=True`
+  3. Wait several months (give users time to update)
+  4. Finally remove the old parameter in a major version bump
+  
+  This is respectful to your API consumers and prevents breaking their code unexpectedly.
+</Callout>
+
+---
+
+## Using Aliases for Non-Python Names
+
+What if you want a parameter name that isn't valid in Python? For example, `search-term` (hyphens aren't allowed in Python variable names).
+
+Use the `alias` parameter:
+
+```python title="matches.py"
+@app.get("/matches", tags=["Matches"])
+def list_matches(
+    sport: Optional[Sport] = None,
+    status: Optional[Status] = None,
+    search_term: Annotated[  # !mark (Python variable name)
+        Optional[str],
+        Query(
+            alias="search-term",  # !mark (URL parameter name)
+            min_length=3,
+            max_length=50,
+        ),
+    ] = None,
+):
+    # ... use search_term in your code ...
+```
+
+Users send requests like:
+
+```bash
+/matches?search-term=Arsenal
+```
+
+But inside your function, you access it as `search_term` (Python-friendly variable name).
+
+<Callout type="info" title="Why Use Aliases?">
+  Useful for:
+  - Matching existing API conventions that use hyphens or other non-Python characters
+  - Maintaining backwards compatibility when renaming parameters internally
+  - Following REST API naming standards (often use kebab-case like `user-id`)
+</Callout>
+
+---
+
+## Complete Example: Fully Validated Endpoint
+
+Here's a complete `/matches` endpoint with all validation applied:
+
+```python title="matches.py"
+@app.get("/matches", tags=["Matches"])
+def list_matches(
+    sport: Annotated[
+        Optional[Sport],
+        Query(
+            title="Sport Type",
+            description="Filter matches by sport (football, basketball, etc.)",
+        ),
+    ] = None,
+    status: Annotated[
+        Optional[Status],
+        Query(
+            title="Match Status",
+            description="Filter by match status (upcoming, completed, etc.)",
+        ),
+    ] = None,
+    team: Annotated[
+        Optional[str],
+        Query(
+            min_length=3,
+            max_length=50,
+            title="Team Name",
+            description="Filter by team name (home or away). Case-insensitive partial match.",
+        ),
+    ] = None,
+    from_date: Annotated[
+        Optional[date],
+        Query(
+            alias="from-date",
+            title="Start Date",
+            description="Filter matches on or after this date (ISO 8601 format: YYYY-MM-DD)",
+        ),
+    ] = None,
+    to_date: Annotated[
+        Optional[date],
+        Query(
+            alias="to-date",
+            title="End Date",
+            description="Filter matches on or before this date (ISO 8601 format: YYYY-MM-DD)",
+        ),
+    ] = None,
+):
+    results = INITIAL_DATA
+
+    # Apply filters
+    if sport:
+        results = [m for m in results if m.sport == sport]
+    if status:
+        results = [m for m in results if m.status == status]
+    if team:
+        team_lower = team.lower()
+        results = [
+            m for m in results
+            if team_lower in m.home_team.lower() or team_lower in m.away_team.lower()
+        ]
+    if from_date:
+        results = [m for m in results if m.date >= from_date]
+    if to_date:
+        results = [m for m in results if m.date <= to_date]
+
+    return results
+```
+
+---
+
+## What Gets Validated
+
+Let's summarize what FastAPI now checks automatically:
+
+| Parameter | Validation Rules | Error if... |
+|-----------|-----------------|-------------|
+| `sport` | Must be valid enum | User sends `sport=soccer` |
+| `status` | Must be valid enum | User sends `status=finished` |
+| `team` | 3-50 characters | User sends `team=AB` or empty |
+| `from_date` | Valid ISO 8601 date | User sends `from-date=tomorrow` |
+| `to_date` | Valid ISO 8601 date | User sends `to-date=2025-13-45` |
+
+All these validations happen **before your function executes**. Invalid requests are rejected with helpful error messages.
+
+<Callout type="info" title="Zero Defensive Code">
+  Notice we didn't add any `if len(team) < 3` checks in our filtering logic. We don't need to — FastAPI guarantees the data is valid before our function runs. This keeps your business logic clean and focused.
+</Callout>
+
+---
+
+## Interactive Docs Benefits
+
+Visit `http://localhost:8000/docs` and look at the `/matches` endpoint. You'll see:
+
+1. **Parameter descriptions** explaining what each filter does
+2. **Type hints** showing expected formats (dates, enums, strings)
+3. **Constraints** visible in the UI (min/max length)
+4. **Dropdown menus** for enums (sport, status) with all valid values
+5. **Deprecated warnings** for phased-out parameters
+
+All this is generated automatically from your `Query` annotations. You wrote the validation once, and it powers both enforcement and documentation.
+
+<Callout type="info" title="Frontend-Friendly">
+  Frontend developers can read your OpenAPI schema (`/openapi.json`) and auto-generate client libraries with the same validation rules. Write validation once, get type safety everywhere.
+</Callout>
+
+---
+
+## The Old Way (Pre-0.95.0)
+
+In older FastAPI versions (before 0.95.0), you'd see code like this:
+
+```python title="Old style - don't use in new code"
+@app.get("/matches")
+def list_matches(
+    team: Optional[str] = Query(default=None, min_length=3, max_length=50),
+):
+    # ...
+```
+
+This works but has drawbacks:
+
+1. If you call this function outside FastAPI, `team` defaults to the `Query` object, not `None`
+2. Editors can't type-check as well
+3. You can't use the same function with other tools like Typer
+
+The `Annotated` style is **always better** for new code.
+
+<Callout type="info" title="Why the Change?">
+  The old style was a FastAPI-specific hack. The new `Annotated` style uses standard Python typing and works with multiple tools. It's more Pythonic and future-proof.
+</Callout>
+
+---
+
+## Common Validation Patterns
+
+Here are some typical query parameter validation patterns:
+
+### Search Strings
+
+```python
+search: Annotated[
+    Optional[str],
+    Query(min_length=2, max_length=100),
+] = None
+```
+
+### Pagination
+
+```python
+page: Annotated[int, Query(ge=1)] = 1  # Greater than or equal to 1
+limit: Annotated[int, Query(ge=1, le=100)] = 20  # Between 1 and 100
+```
+
+### Sorting
+
+```python
+class SortBy(str, Enum):
+    date = "date"
+    team = "team"
+    sport = "sport"
+
+sort_by: Annotated[Optional[SortBy], Query()] = None
+```
+
+### Multiple Values
+
+```python
+tags: Annotated[
+    Optional[List[str]],
+    Query(min_length=1, max_length=20),
+] = None
+```
+
+User sends: `/matches?tags=important&tags=featured`
+
+---
+
+## What Query Can't Validate
+
+`Query` handles type, length, and format validation. But it can't validate **relationships between parameters**:
+
+```bash title="Logically invalid but type-valid"
+/matches?from-date=2025-12-31&to-date=2025-01-01
+```
+
+This passes validation (both dates are valid), but `from_date` is **after** `to_date` — that makes no logical sense. You have to check this manually:
+
+```python title="matches.py"
+@app.get("/matches", tags=["Matches"])
+def list_matches(
+    # ... parameters ...
+):
+    # Validate date range
+    if from_date and to_date and from_date > to_date:  # !mark
+        return {"error": "from-date must be before to-date"}  # !mark
+
+    # ... filtering logic ...
+```
+
+<Callout type="warn" title="Two Layers of Validation">
+  - **FastAPI/Pydantic:** Validates individual parameter types and formats
+  - **Your code:** Validates logical relationships between parameters
+  
+  Both layers are necessary for a robust API.
+</Callout>
+
+---
+
+## Summary: Query Validation Benefits
+
+By adding `Query` validation, you get:
+
+1. ✅ **Automatic input validation** — bad requests rejected before your code runs
+2. ✅ **Clear error messages** — users know exactly what's wrong
+3. ✅ **Self-documenting API** — validation rules appear in generated docs
+4. ✅ **Reduced defensive code** — no need for manual length checks
+5. ✅ **Frontend type safety** — auto-generated clients inherit validation rules
+
+All from a few extra lines of type annotations.
+
+<Callout type="info" title="Best Practice">
+  Always use `Query` for query parameters that accept user input. The small extra syntax pays off in reliability, documentation, and developer experience.
+</Callout>
+
+---
+
+## What's Next
+
+We've validated query parameters, but there's more to explore:
+
+- **Path parameter validation** (similar to Query but for URL paths)
+- **Request body validation** (we covered this in POST validation)
+- **Header and Cookie validation** (for authentication and state)
+- **Custom validators** (for complex business rules)
+
+Our API now has solid foundations — typed data models, validated inputs, and clear business rules. In the next lesson, we'll review everything we've built and discuss production considerations.

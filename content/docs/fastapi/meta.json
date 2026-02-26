@@ -7,6 +7,9 @@
     "03-basic-routes",
     "04-advanced-filtering",
     "05-post-validation",
-    "06-review"
+    "06-review",
+    "07-query-validation",
+    "08-path-validation",
+    "09-query-parameter-model"
   ]
 }
