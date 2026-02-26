@@ -4,6 +4,213 @@ description: Build deeply nested Pydantic models for rich match data with player
 ---
 
 import { Callout } from 'fumadocs-ui/components/callout';
+import { CopyFinalCode } from '@/components/copy-final-code';
+
+export const _fc = `from datetime import date
+from enum import Enum
+from typing import Annotated, List, Literal, Optional
+
+from fastapi import FastAPI, Path, Query
+from pydantic import BaseModel, Field, HttpUrl, model_validator
+
+app = FastAPI(title="Sports Matches API")
+
+
+class Sport(str, Enum):
+    football = "football"
+    cricket = "cricket"
+    hockey = "hockey"
+    basketball = "basketball"
+    baseball = "baseball"
+
+
+class Status(str, Enum):
+    upcoming = "upcoming"
+    cancelled = "cancelled"
+    abandoned = "abandoned"
+    completed = "completed"
+
+
+class Winner(str, Enum):
+    home_team = "home_team"
+    away_team = "away_team"
+    draw = "draw"
+
+
+class Player(BaseModel):
+    number: int = Field(ge=1, le=99, description="Jersey number")
+    name: str = Field(min_length=2, max_length=50)
+    position: Literal["goalkeeper", "defender", "midfielder", "forward"]
+    is_captain: bool = False
+
+
+class MatchEvent(BaseModel):
+    minute: int = Field(ge=0, le=120, description="Minute when event occurred")
+    event_type: Literal["goal", "yellow_card", "red_card", "substitution"]
+    team: Literal["home", "away"]
+    player_name: str = Field(min_length=2, max_length=50)
+    description: Optional[str] = Field(None, max_length=200)
+
+
+class TeamStats(BaseModel):
+    possession_percent: int = Field(ge=0, le=100)
+    shots: int = Field(ge=0)
+    shots_on_target: int = Field(ge=0)
+    corners: int = Field(ge=0)
+    fouls: int = Field(ge=0)
+    yellow_cards: int = Field(ge=0)
+    red_cards: int = Field(ge=0)
+
+    @model_validator(mode='after')
+    def validate_shots(self):
+        if self.shots_on_target > self.shots:
+            raise ValueError("shots_on_target cannot exceed total shots")
+        return self
+
+
+class MatchStatistics(BaseModel):
+    home_stats: TeamStats
+    away_stats: TeamStats
+    attendance: Optional[int] = Field(None, ge=0, description="Number of spectators")
+    referee: Optional[str] = Field(None, min_length=2, max_length=50)
+
+
+class Match(BaseModel):
+    id: int
+    home_team: str = Field(min_length=2, max_length=50)
+    away_team: str = Field(min_length=2, max_length=50)
+    sport: Literal["football", "cricket", "hockey", "basketball", "baseball"]
+    date: date
+    status: Literal["upcoming", "completed", "cancelled", "abandoned"]
+    venue: Optional[str] = Field(None, min_length=3, max_length=100)
+    score_home: Optional[int] = Field(None, ge=0)
+    score_away: Optional[int] = Field(None, ge=0)
+    home_lineup: Optional[list[Player]] = None
+    away_lineup: Optional[list[Player]] = None
+    events: list[MatchEvent] = Field(default_factory=list)
+    statistics: Optional[MatchStatistics] = None
+    tags: set[str] = Field(default_factory=set)
+    official_page: Optional[HttpUrl] = None
+    player_ratings: dict[str, float] = Field(default_factory=dict)
+
+    @model_validator(mode='after')
+    def validate_teams_different(self):
+        if self.home_team == self.away_team:
+            raise ValueError("home_team and away_team must be different")
+        return self
+
+
+class MatchFilters(BaseModel):
+    sport: Optional[Literal["football", "cricket", "hockey", "basketball", "baseball"]] = None
+    status: Optional[Literal["upcoming", "cancelled", "abandoned", "completed"]] = None
+    winner: Optional[Literal["home_team", "away_team", "draw"]] = None
+    team: Optional[str] = Field(None, min_length=3, max_length=50,
+                                description="Filter by team name (case-insensitive partial match)")
+
+
+class DateRangeFilters(BaseModel):
+    from_date: Optional[date] = Field(None, description="Matches on or after this date (YYYY-MM-DD)")
+    to_date: Optional[date] = Field(None, description="Matches on or before this date (YYYY-MM-DD)")
+
+    @model_validator(mode='after')
+    def validate_date_range(self):
+        if self.from_date and self.to_date:
+            if self.from_date > self.to_date:
+                raise ValueError("from_date must be before or equal to to_date")
+        return self
+
+
+class PaginationParams(BaseModel):
+    page: int = Field(1, ge=1, description="Page number (1-indexed)")
+    limit: int = Field(20, ge=1, le=100, description="Items per page (max 100)")
+
+
+INITIAL_DATA: List[Match] = [
+    Match(id=1, home_team="Arsenal", away_team="Chelsea", sport="football",
+          date=date(2025, 10, 21), status="completed", venue="Emirates Stadium"),
+    Match(id=2, home_team="Lakers", away_team="Warriors", sport="basketball",
+          date=date(2025, 11, 15), status="completed", venue="Crypto.com Arena"),
+    Match(id=3, home_team="Real Madrid", away_team="Barcelona", sport="football",
+          date=date(2026, 4, 10), status="completed", venue="Santiago Bernabeu"),
+    Match(id=4, home_team="Knicks", away_team="Celtics", sport="basketball",
+          date=date(2026, 3, 5), status="upcoming", venue="Madison Square Garden"),
+    Match(id=5, home_team="Yankees", away_team="Red Sox", sport="baseball",
+          date=date(2025, 8, 10), status="abandoned", venue="Yankee Stadium"),
+    Match(id=6, home_team="India", away_team="Pakistan", sport="cricket",
+          date=date(2026, 3, 24), status="completed", venue="Narendra Modi Stadium"),
+    Match(id=7, home_team="Lakers", away_team="Warriors", sport="basketball",
+          date=date(2025, 1, 15), status="completed", venue="Crypto.com Arena"),
+]
+
+
+@app.get("/health", tags=["System"])
+def health_check():
+    return {"status": "ok"}
+
+
+@app.get("/matches", tags=["Matches"])
+def list_matches(
+    filters: Annotated[MatchFilters, Query()],
+    date_range: Annotated[DateRangeFilters, Query()],
+    pagination: Annotated[PaginationParams, Query()],
+):
+    matches = list(INITIAL_DATA)
+
+    if filters.sport:
+        matches = [m for m in matches if m.sport == filters.sport]
+    if filters.status:
+        matches = [m for m in matches if m.status == filters.status]
+    if filters.team:
+        team_lower = filters.team.lower()
+        matches = [m for m in matches if
+                   team_lower in m.home_team.lower() or team_lower in m.away_team.lower()]
+    if date_range.from_date:
+        matches = [m for m in matches if m.date >= date_range.from_date]
+    if date_range.to_date:
+        matches = [m for m in matches if m.date <= date_range.to_date]
+
+    total = len(matches)
+    start = (pagination.page - 1) * pagination.limit
+    paginated = matches[start:start + pagination.limit]
+
+    return {"total": total, "page": pagination.page,
+            "limit": pagination.limit, "results": paginated}
+
+
+@app.get("/matches/{match_id}", tags=["Matches"])
+def get_match_by_id(
+    match_id: Annotated[
+        int,
+        Path(ge=1, title="Match ID",
+             description="The unique identifier of the match (must be positive)"),
+    ],
+):
+    for match in INITIAL_DATA:
+        if match.id == match_id:
+            return match
+    return {"error": "Match not found"}
+
+
+@app.post("/matches", tags=["Matches"])
+def create_match(match: Match):
+    if match.status == "upcoming" and match.date < date.today():
+        return {"error": "Upcoming match date cannot be in the past."}
+    if match.home_team == match.away_team:
+        return {"error": "Both teams cannot have the same name."}
+    match.id = INITIAL_DATA[-1].id + 1
+    INITIAL_DATA.append(match)
+    return match
+
+
+@app.post("/matches/detailed", tags=["Matches"])
+def create_detailed_match(match: Match):
+    """Create a match with full details including lineups, events, and statistics."""
+    match.id = INITIAL_DATA[-1].id + 1 if INITIAL_DATA else 1
+    INITIAL_DATA.append(match)
+    return match
+`;
+
+<CopyFinalCode code={_fc} />
 
 # Nested Models and Complex Data
 

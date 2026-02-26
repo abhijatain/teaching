@@ -1,5 +1,5 @@
 {
-  "title": "Building a FastAPI Filtering System",
+  "title": "Building a MiniApi",
   "description": "Learn FastAPI by building a sports matches API from scratch, starting with strings and progressively adding type safety, validation, and filters.",
   "pages": [
     "01-setup",
@@ -7,12 +7,6 @@
     "03-basic-routes",
     "04-advanced-filtering",
     "05-post-validation",
-    "06-review",
-    "07-pagination-soritng",
-    "08-query-validation",
-    "09-path-validation",
-    "10-query-parameter-model",
-    "11-body-field-validation",
-    "12-nested-models"
+    "06-review"
   ]
 }
