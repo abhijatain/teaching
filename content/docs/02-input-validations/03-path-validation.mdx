@@ -1,0 +1,429 @@
+---
+title: Path Parameter Validation
+description: Apply the same validation techniques from the last lesson to path parameters using FastAPI's Path class.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { CopyFinalCode } from '@/components/copy-final-code';
+
+export const _fc = `from datetime import date
+from enum import Enum
+from typing import Annotated, List, Literal, Optional
+
+from fastapi import FastAPI, Path, Query
+from pydantic import BaseModel
+
+app = FastAPI(title="Sports Matches API")
+
+
+class Sport(str, Enum):
+    football = "football"
+    cricket = "cricket"
+    hockey = "hockey"
+    basketball = "basketball"
+    baseball = "baseball"
+
+
+class Status(str, Enum):
+    upcoming = "upcoming"
+    cancelled = "cancelled"
+    abandoned = "abandoned"
+    completed = "completed"
+
+
+class Winner(str, Enum):
+    home_team = "home_team"
+    away_team = "away_team"
+    draw = "draw"
+
+
+class TeamFilter(str, Enum):
+    won = "won"
+    lost = "lost"
+    draw = "draw"
+
+
+class Match(BaseModel):
+    id: int
+    home_team: str
+    away_team: str
+    venue: Optional[str] = None
+    date: date
+    sport: Sport
+    status: Status
+    winner: Optional[Winner] = None
+
+
+INITIAL_DATA: List[Match] = [
+    Match(id=1, home_team="Arsenal", away_team="Chelsea", sport=Sport.football,
+          date=date(2025, 10, 21), status=Status.completed, winner=Winner.draw,
+          venue="Emirates Stadium"),
+    Match(id=2, home_team="Lakers", away_team="Warriors", sport=Sport.basketball,
+          date=date(2025, 11, 15), status=Status.completed, winner=Winner.home_team,
+          venue="Crypto.com Arena"),
+    Match(id=3, home_team="Real Madrid", away_team="Barcelona", sport=Sport.football,
+          date=date(2026, 4, 10), status=Status.completed, winner=Winner.draw,
+          venue="Santiago Bernabeu"),
+    Match(id=4, home_team="Knicks", away_team="Celtics", sport=Sport.basketball,
+          date=date(2026, 3, 5), status=Status.upcoming, winner=None,
+          venue="Madison Square Garden"),
+    Match(id=5, home_team="Yankees", away_team="Red Sox", sport=Sport.baseball,
+          date=date(2025, 8, 10), status=Status.abandoned, winner=None,
+          venue="Yankee Stadium"),
+    Match(id=6, home_team="India", away_team="Pakistan", sport=Sport.cricket,
+          date=date(2026, 3, 24), status=Status.completed, winner=Winner.home_team,
+          venue="Narendra Modi Stadium"),
+    Match(id=7, home_team="Lakers", away_team="Warriors", sport=Sport.basketball,
+          date=date(2025, 1, 15), status=Status.completed, winner=Winner.away_team,
+          venue="Crypto.com Arena"),
+]
+
+
+@app.get("/health", tags=["System"])
+def health_check():
+    return {"status": "ok"}
+
+
+@app.get("/matches", tags=["Matches"])
+def list_matches(
+    sport: Annotated[
+        Optional[Sport],
+        Query(title="Sport Type", description="Filter matches by sport"),
+    ] = None,
+    status: Annotated[
+        Optional[Status],
+        Query(title="Match Status", description="Filter by match status"),
+    ] = None,
+    winner: Annotated[Optional[Winner], Query()] = None,
+    team_name: Annotated[
+        Optional[str],
+        Query(min_length=3, max_length=50, title="Team Name",
+              description="Filter by team name. Case-insensitive partial match."),
+    ] = None,
+    team_filter: Annotated[Optional[TeamFilter], Query()] = None,
+    from_date: Annotated[
+        Optional[date],
+        Query(alias="from-date", title="Start Date",
+              description="Filter matches on or after this date (YYYY-MM-DD)"),
+    ] = None,
+    to_date: Annotated[
+        Optional[date],
+        Query(alias="to-date", title="End Date",
+              description="Filter matches on or before this date (YYYY-MM-DD)"),
+    ] = None,
+    page: Annotated[int, Query(ge=1, description="Page number (1-indexed)")] = 1,
+    limit: Annotated[int, Query(ge=1, le=100, description="Items per page")] = 20,
+    sort_by: Annotated[
+        Optional[Literal["date", "sport", "status", "home_team"]],
+        Query(description="Field to sort by"),
+    ] = None,
+    sort_order: Annotated[Literal["asc", "desc"], Query(description="Sort order")] = "asc",
+):
+    if from_date and to_date and from_date > to_date:
+        return {"error": "from-date must be before to-date"}
+
+    matches = list(INITIAL_DATA)
+
+    if status:
+        matches = [m for m in matches if m.status == status]
+    if sport:
+        matches = [m for m in matches if m.sport == sport]
+    if winner:
+        matches = [m for m in matches if m.winner == winner]
+    if from_date:
+        matches = [m for m in matches if m.date >= from_date]
+    if to_date:
+        matches = [m for m in matches if m.date <= to_date]
+
+    if team_name:
+        team = team_name.lower()
+        if team_filter is None:
+            matches = [m for m in matches if team in m.home_team.lower() or team in m.away_team.lower()]
+        elif team_filter == TeamFilter.won:
+            matches = [m for m in matches if
+                       (team == m.home_team.lower() and m.winner == Winner.home_team) or
+                       (team == m.away_team.lower() and m.winner == Winner.away_team)]
+        elif team_filter == TeamFilter.lost:
+            matches = [m for m in matches if
+                       (team == m.home_team.lower() and m.winner == Winner.away_team) or
+                       (team == m.away_team.lower() and m.winner == Winner.home_team)]
+        elif team_filter == TeamFilter.draw:
+            matches = [m for m in matches if
+                       (team in m.home_team.lower() or team in m.away_team.lower()) and
+                       m.winner == Winner.draw]
+
+    if sort_by:
+        matches = sorted(matches, key=lambda m: getattr(m, sort_by),
+                         reverse=(sort_order == "desc"))
+
+    total = len(matches)
+    total_pages = (total + limit - 1) // limit if total > 0 else 0
+
+    if page > total_pages and total > 0:
+        return {"error": f"Page {page} does not exist. Total pages: {total_pages}",
+                "total": total, "total_pages": total_pages}
+
+    start = (page - 1) * limit
+    paginated = matches[start:start + limit]
+
+    if not paginated:
+        return {"message": "No matches found.", "total": 0, "page": page,
+                "limit": limit, "total_pages": 0, "results": []}
+
+    return {"total": total, "page": page, "limit": limit,
+            "total_pages": total_pages, "results": paginated}
+
+
+@app.get("/matches/{match_id}", tags=["Matches"])
+def get_match_by_id(
+    match_id: Annotated[
+        int,
+        Path(ge=1, title="Match ID",
+             description="The unique identifier of the match (must be positive)"),
+    ],
+):
+    for match in INITIAL_DATA:
+        if match.id == match_id:
+            return match
+    return {"error": "Match not found"}
+
+
+@app.post("/matches", tags=["Matches"])
+def create_match(match: Match):
+    if match.status is Status.upcoming and match.date < date.today():
+        return {"error": "Upcoming match date cannot be in the past."}
+    if match.status is not Status.completed and match.winner is not None:
+        return {"error": "Status should be Completed to have a winner"}
+    if match.home_team == match.away_team:
+        return {"error": "Both teams cannot have the same name."}
+    if match.winner is None and match.status is Status.completed:
+        return {"error": "Winner cannot be None if match is completed"}
+    match.id = INITIAL_DATA[-1].id + 1
+    INITIAL_DATA.append(match)
+    return match
+`;
+
+# Path Parameter Validation
+
+In the last lesson we used `Query` to add constraints and documentation to our query parameters — things like `ge=1` on `page`, `min_length=3` on `team_name`, and `alias` for the date fields. There's a second kind of parameter we haven't validated yet: **path parameters**.
+
+Path parameters are the values embedded directly in the URL. Our `GET /matches/{match_id}` endpoint has one:
+
+```python title="matches.py - where we left off"
+@app.get("/matches/{match_id}", tags=["Matches"])
+def get_match_by_id(match_id: int):
+    for match in INITIAL_DATA:
+        if match.id == match_id:
+            return match
+    return {"error": "Match not found"}
+```
+
+FastAPI already does basic type validation here — it rejects requests like `/matches/abc` because `"abc"` can't be converted to an `int`. But it happily accepts `/matches/-1` and `/matches/0`, which are valid integers but nonsensical IDs. Let's fix that.
+
+---
+
+## The Problem: Negative and Zero IDs
+
+Try these requests against the current endpoint:
+
+```bash title="All of these reach your function — should they?"
+curl http://localhost:8000/matches/-1
+curl http://localhost:8000/matches/0
+curl http://localhost:8000/matches/-999999
+```
+
+All three pass validation, loop through `INITIAL_DATA`, find nothing, and return `"Match not found"`. The user gets an error either way, but for the wrong reason — the ID is structurally invalid, not just absent from our data. And we wasted time searching for something that could never exist.
+
+<Callout type="warn" title="Why This Matters">
+  IDs should always be positive integers. Accepting negative or zero values means wasted processing on every bad request, and leaves the door open for bugs if you later give special meaning to certain values (like `-1` for "latest match"). Better to reject them immediately with a clear error.
+</Callout>
+
+---
+
+## Step 1 — Import Path
+
+`Path` is the counterpart to `Query` — it works identically, but for parameters that come from the URL path rather than the query string. Add it to the FastAPI import:
+
+```diff title="matches.py"
+- from fastapi import FastAPI, Query
++ from fastapi import FastAPI, Path, Query
+```
+
+That's the only new import needed. `Annotated` is already imported from the last lesson.
+
+---
+
+## Step 2 — Add a Minimum Value
+
+Apply `Path` to `match_id` using the same `Annotated` syntax we used with `Query`:
+
+```diff title="matches.py"
+  @app.get("/matches/{match_id}", tags=["Matches"])
+- def get_match_by_id(match_id: int):
++ def get_match_by_id(
++     match_id: Annotated[int, Path(ge=1)],
++ ):
+      for match in INITIAL_DATA:
+          if match.id == match_id:
+              return match
+      return {"error": "Match not found"}
+```
+
+`ge=1` means "greater than or equal to 1" — the exact same constraint we used on `page` in the last lesson. Same syntax, same behavior, different class.
+
+Now try a negative ID:
+
+```bash
+curl http://localhost:8000/matches/-1
+```
+
+Response — automatically from FastAPI, before your function runs:
+
+```json title="Validation error"
+{
+  "detail": [
+    {
+      "loc": ["path", "match_id"],
+      "msg": "ensure this value is greater than or equal to 1",
+      "type": "value_error.number.not_ge",
+      "ctx": {"limit_value": 1}
+    }
+  ]
+}
+```
+
+Notice `"loc": ["path", "match_id"]` — compare this to the errors from the last lesson where it said `"loc": ["query", "page"]`. Same structure, just a different source location.
+
+---
+
+## The Four Numeric Constraints
+
+Just like with `Query`, `Path` supports four numeric constraint options:
+
+| Constraint | Meaning | Accepts |
+|-----------|---------|---------|
+| `ge=1` | Greater than or equal to 1 | 1, 2, 3 … |
+| `gt=0` | Greater than 0 | 1, 2, 3 … (same result for integers) |
+| `le=1000` | Less than or equal to 1000 | … 998, 999, 1000 |
+| `lt=1001` | Less than 1001 | … 998, 999, 1000 (same result for integers) |
+
+You can combine them. For example, to constrain an ID to a specific range:
+
+```python
+match_id: Annotated[int, Path(ge=1, le=999999)]
+```
+
+<Callout type="info" title="ge vs gt for IDs">
+  `ge=1` and `gt=0` produce identical results for whole numbers — both reject 0 and accept 1, 2, 3… The difference only matters for decimals. For IDs, `ge=1` is the clearer choice because it explicitly says "1 or higher."
+</Callout>
+
+---
+
+## Step 3 — Add Documentation
+
+Just like with `Query`, you can add `title` and `description` to `Path` and they'll appear in the auto-generated docs:
+
+```diff title="matches.py"
+  def get_match_by_id(
+-     match_id: Annotated[int, Path(ge=1)],
++     match_id: Annotated[
++         int,
++         Path(
++             ge=1,
++             title="Match ID",
++             description="The unique identifier of the match (must be positive)",
++         ),
++     ],
+  ):
+```
+
+Visit `http://localhost:8000/docs` and look at the `/matches/{match_id}` endpoint. The parameter now shows its constraint (`minimum: 1`) and description alongside the type information.
+
+<Callout type="info" title="Path Parameters Are Always Required">
+  Unlike query parameters, path parameters can never be optional. The URL `/matches/` (without an ID) matches a different route entirely — or no route at all. So there's no `= None` or default value on path parameters. That's why you don't see `Optional[int]` here.
+</Callout>
+
+---
+
+## Path vs Query — A Quick Comparison
+
+You now know both `Path` and `Query`. They work identically — same `Annotated` syntax, same constraint options, same documentation fields. The only difference is what they validate:
+
+| | `Path` | `Query` |
+|--|--------|---------|
+| **Where the value comes from** | URL path — `/matches/{match_id}` | URL query string — `?page=2` |
+| **Always required?** | Yes — it's part of the URL | No — can have defaults |
+| **Syntax** | `Annotated[int, Path(ge=1)]` | `Annotated[int, Query(ge=1)]` |
+| **Error location** | `"loc": ["path", ...]` | `"loc": ["query", ...]` |
+
+Think of it this way: **path parameters identify which resource** you want (`/matches/7` means match number 7), while **query parameters shape how you want it** (`?include_details=true`).
+
+---
+
+## Combining Both in One Endpoint
+
+You can validate both kinds of parameters in the same endpoint — they each carry their own `Path` or `Query` annotations:
+
+```python title="matches.py"
+@app.get("/matches/{match_id}", tags=["Matches"])
+def get_match_by_id(
+    match_id: Annotated[
+        int,
+        Path(ge=1, title="Match ID", description="The match to retrieve"),
+    ],
+    include_venue: Annotated[
+        bool,
+        Query(description="Set to false to exclude venue from the response"),
+    ] = True,
+):
+    for match in INITIAL_DATA:
+        if match.id == match_id:
+            if include_venue:
+                return match
+            return {
+                "id": match.id,
+                "home_team": match.home_team,
+                "away_team": match.away_team,
+                "date": match.date,
+                "sport": match.sport,
+                "status": match.status,
+                "winner": match.winner,
+            }
+    return {"error": "Match not found"}
+```
+
+FastAPI validates both independently — `match_id` must be a positive integer from the path, and `include_venue` must be a boolean from the query string.
+
+---
+
+## What Path Can't Validate
+
+Just like `Query`, `Path` validates individual parameters but not relationships between them. If you had a hypothetical endpoint that took two path values:
+
+```python title="matches.py - hypothetical example"
+@app.get("/matches/range/{start_year}/{end_year}", tags=["Matches"])
+def get_matches_by_year_range(
+    start_year: Annotated[int, Path(ge=2000, le=2100)],
+    end_year: Annotated[int, Path(ge=2000, le=2100)],
+):
+    # Both years pass individually, but is start_year actually before end_year?
+    if start_year > end_year:  # !mark
+        return {"error": "start_year must be before end_year"}  # !mark
+    # ...
+```
+
+Each year passes `Path` validation on its own, but their relationship — start must be before end — needs a manual check, just like the `from-date`/`to-date` check we wrote in the last lesson.
+
+<Callout type="warn" title="The Same Two Layers Apply">
+  **FastAPI via `Path`** validates individual parameter types and ranges. **Your code** validates relationships between parameters. This is the same pattern we saw with `Query` in the last lesson — it doesn't change just because the parameters live in the path.
+</Callout>
+
+---
+
+## What's Next
+
+We've now applied `Query` and `Path` validation across every parameter in our API. But look at our `list_matches` function — it has eleven parameters. As the API grows, that signature will become hard to read and even harder to reuse across other endpoints.
+
+In the next lesson, we'll solve this by grouping related parameters into dedicated Pydantic models, which also unlocks a cleaner way to do the cross-parameter validation we've been writing manually.
+
+<CopyFinalCode code={_fc} />

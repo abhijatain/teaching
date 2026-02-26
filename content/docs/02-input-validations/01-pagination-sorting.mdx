@@ -1,0 +1,568 @@
+---
+title: Pagination and Sorting
+description: Add pagination and sorting to handle large result sets efficiently.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { CopyFinalCode } from '@/components/copy-final-code';
+
+export const _fc = `import math
+from datetime import date
+from enum import Enum
+from operator import attrgetter
+from typing import List, Optional
+
+from fastapi import FastAPI
+from pydantic import BaseModel
+
+app = FastAPI(title="Sports Matches API")
+
+
+# -------------------- ENUMS --------------------
+
+
+class Sport(str, Enum):
+    football = "football"
+    cricket = "cricket"
+    hockey = "hockey"
+    basketball = "basketball"
+    baseball = "baseball"
+
+
+class Status(str, Enum):
+    upcoming = "upcoming"
+    cancelled = "cancelled"
+    abandoned = "abandoned"
+    completed = "completed"
+
+
+class Winner(str, Enum):
+    home_team = "home_team"
+    away_team = "away_team"
+    draw = "draw"
+
+
+class SortBy(str, Enum):
+    date = "date"
+    sport = "sport"
+    status = "status"
+    home_team = "home_team"
+
+
+class SortOrder(str, Enum):
+    asc = "asc"
+    desc = "desc"
+
+
+# -------------------- MODELS --------------------
+
+
+class Match(BaseModel):
+    id: int
+    home_team: str
+    away_team: str
+    venue: Optional[str] = None
+    date: date
+    sport: Sport
+    status: Status
+    winner: Optional[Winner] = None
+
+
+# -------------------- DATA --------------------
+
+INITIAL_DATA: List[Match] = [
+    Match(id=1, home_team="Arsenal", away_team="Chelsea", sport=Sport.football,
+          date=date(2025, 10, 21), status=Status.completed, winner=Winner.draw,
+          venue="Emirates Stadium"),
+    Match(id=2, home_team="Lakers", away_team="Warriors", sport=Sport.basketball,
+          date=date(2025, 11, 15), status=Status.completed, winner=Winner.home_team,
+          venue="Crypto.com Arena"),
+    Match(id=3, home_team="Real Madrid", away_team="Barcelona", sport=Sport.football,
+          date=date(2026, 4, 10), status=Status.completed, winner=Winner.draw,
+          venue="Santiago Bernabeu"),
+    Match(id=4, home_team="Knicks", away_team="Celtics", sport=Sport.basketball,
+          date=date(2026, 3, 5), status=Status.upcoming, winner=None,
+          venue="Madison Square Garden"),
+    Match(id=5, home_team="Yankees", away_team="Red Sox", sport=Sport.baseball,
+          date=date(2025, 8, 10), status=Status.abandoned, winner=None,
+          venue="Yankee Stadium"),
+    Match(id=6, home_team="India", away_team="Pakistan", sport=Sport.cricket,
+          date=date(2026, 3, 24), status=Status.completed, winner=Winner.home_team,
+          venue="Narendra Modi Stadium"),
+    Match(id=7, home_team="Lakers", away_team="Warriors", sport=Sport.basketball,
+          date=date(2025, 1, 15), status=Status.completed, winner=Winner.away_team,
+          venue="Crypto.com Arena"),
+]
+
+
+class TeamFilter(str, Enum):
+    won = "won"
+    lost = "lost"
+    draw = "draw"
+
+
+# -------------------- ROUTES --------------------
+
+
+@app.get("/health", tags=["System"])
+def health_check():
+    return {"status": "ok"}
+
+
+@app.get("/matches", tags=["Matches"])
+def list_matches(
+    status: Optional[Status] = None,
+    sport: Optional[Sport] = None,
+    winner: Optional[Winner] = None,
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+    team_name: Optional[str] = None,
+    team_filter: Optional[TeamFilter] = None,
+    page: int = 1,
+    limit: int = 10,
+    sort_by: Optional[SortBy] = None,
+    sort_order: SortOrder = SortOrder.asc,
+):
+    if team_filter and winner:
+        return {"Error": "These team_filter and winner cannot be selected together."}
+    if (team_filter or winner) and (
+        status is not Status.completed and status is not None
+    ):
+        return {"Error": "team_filter or winner can only be used when status is 'completed'."}
+
+    if start_date and end_date and start_date > end_date:
+        return {"Error": "start_date must be before or equal to end_date."}
+
+    matches = INITIAL_DATA
+
+    if status:
+        matches = [m for m in matches if m.status == status]
+    if sport:
+        matches = [m for m in matches if m.sport == sport]
+    if winner:
+        matches = [m for m in matches if m.winner == winner]
+    if start_date:
+        matches = [m for m in matches if m.date >= start_date]
+    if end_date:
+        matches = [m for m in matches if m.date <= end_date]
+
+    if team_name:
+        team = team_name.lower()
+        if team_filter is None:
+            matches = [m for m in matches if team in m.home_team.lower() or team in m.away_team.lower()]
+        elif team_filter is TeamFilter.won:
+            matches = [match for match in matches if
+                       (team == match.home_team.lower() and match.winner == Winner.home_team) or
+                       (team == match.away_team.lower() and match.winner == Winner.away_team)]
+        elif team_filter is TeamFilter.lost:
+            matches = [match for match in matches if
+                       (team == match.home_team.lower() and match.winner != Winner.home_team) or
+                       (team == match.away_team.lower() and match.winner != Winner.away_team)]
+        elif team_filter is TeamFilter.draw:
+            matches = [match for match in matches if
+                       (team == match.home_team.lower() or team == match.away_team.lower()) and
+                       match.winner == Winner.draw]
+
+    if not matches:
+        return {"message": "No matches found for the given filters."}
+
+    if sort_by:
+        reverse = sort_order == "desc"
+        matches.sort(key=attrgetter(sort_by), reverse=reverse)
+
+    total = len(matches)
+    total_pages = math.ceil(total / limit)
+    start = (page - 1) * limit
+    end = start + limit
+    return {
+        "total": total,
+        "page": page,
+        "limit": limit,
+        "total_pages": total_pages,
+        "matches": matches[start:end],
+    }
+
+
+@app.get("/matches/{match_id}", tags=["Matches"])
+def get_match_by_id(match_id: int):
+    matches = INITIAL_DATA
+    matches = [match for match in matches if match.id == match_id]
+    if len(matches) == 0:
+        return {"error": "Match Id not found"}
+    return matches[0]
+
+
+@app.post("/matches", tags=["Matches"])
+def create_match(match: Match):
+    if match.status is Status.upcoming:
+        if match.date < date.today():
+            return {"Error": "Upcoming match date cannot be in the past."}
+    if match.status is not Status.completed:
+        if match.winner is not None:
+            return {"Error": "Status should be Completed to have a winner"}
+    if match.home_team == match.away_team:
+        return {"Error": "Both teams cannot have the same name."}
+    if match.winner is None:
+        if match.status is Status.completed:
+            return {"Error": " Winner cannot be None if match is completed"}
+    new_id = INITIAL_DATA[-1].id + 1
+    match.id = new_id
+    INITIAL_DATA.append(match)
+    return match
+`;
+
+# Pagination and Sorting
+
+Our filtering works great, but there are two problems we need to solve. First, the endpoint returns **every single match** that passes the filters — if that's 5,000 results, the client gets a 5,000-item JSON array every time. Second, our date filtering is clunky to use. Let's fix both.
+
+---
+
+## Step 1 — Replace Date Filter with a Date Range
+
+### The Problem with the Current Approach
+
+Right now, filtering by date requires two separate query parameters working together:
+
+```python title="matches.py - current date filtering"
+match_date: Optional[date] = None,   # the date itself
+date_filter: Optional[DateFilter] = None,  # eq / gt / lt
+```
+
+To find matches after January 1st 2025, a user has to send:
+
+```
+/matches?match_date=2025-01-01&date_filter=gt
+```
+
+This has several problems. The user has to know both parameters exist and that they need to be used together. If they send `match_date` without `date_filter`, it silently defaults to an exact match — which is almost never what they want when filtering a list. And there is no way to express a range like "between January and March" — that would require two separate requests.
+
+### The Better Approach: start_date and end_date
+
+Instead of one date plus an operator, we give the user two optional boundaries:
+
+- `start_date` — show matches **on or after** this date
+- `end_date` — show matches **on or before** this date
+
+Each one works independently, and together they express a range naturally:
+
+```
+/matches?start_date=2025-01-01               # on or after Jan 1
+/matches?end_date=2025-12-31                 # on or before Dec 31
+/matches?start_date=2025-01-01&end_date=2025-12-31   # within 2025
+```
+
+<Callout type="info" title="Why This is Better">
+  With `match_date` + `date_filter`, you needed to learn two params just to filter by date, and a range wasn't possible in a single request. With `start_date` and `end_date`, every common case — on or after, on or before, within a range — is handled by a single intuitive request. Neither param depends on the other.
+</Callout>
+
+### Making the Change
+
+First, the `DateFilter` enum is no longer needed at all. Remove it:
+
+```diff title="matches.py"
+- class DateFilter(str, Enum):
+-     eq = "eq"
+-     gt = "gt"
+-     lt = "lt"
+```
+
+In the function signature, replace the two old parameters with the two new ones:
+
+```diff title="matches.py"
+def list_matches(
+    status: Optional[Status] = None,
+    sport: Optional[Sport] = None,
+    winner: Optional[Winner] = None,
+-   match_date: Optional[date] = None,
+-   date_filter: Optional[DateFilter] = None,
++   start_date: Optional[date] = None,
++   end_date: Optional[date] = None,
+    team_name: Optional[str] = None,
+    team_filter: Optional[TeamFilter] = None,
+):
+```
+
+Add a sanity check right after the existing validation block, so users can't accidentally send an inverted range where the start is after the end:
+
+```diff title="matches.py"
++ if start_date and end_date and start_date > end_date:
++     return {"Error": "start_date must be before or equal to end_date."}
+```
+
+Now replace the old three-branch `if/elif/else` date logic with two simple independent filters:
+
+```diff title="matches.py"
+- if match_date:
+-     if date_filter == DateFilter.gt:
+-         matches = [m for m in matches if m.date > match_date]
+-     elif date_filter == DateFilter.lt:
+-         matches = [m for m in matches if m.date < match_date]
+-     else:
+-         matches = [m for m in matches if m.date == match_date]
++ if start_date:
++     matches = [m for m in matches if m.date >= start_date]
++ if end_date:
++     matches = [m for m in matches if m.date <= end_date]
+```
+
+Notice how each filter is now completely independent — you can use either one or both, and the logic is a single readable line each.
+
+---
+
+## Step 2 — Add Pagination
+
+### Why We Need Pagination
+
+Even with good filters, some queries will return a lot of results. A query for all completed basketball matches might return hundreds of records. Sending all of them in one response is wasteful — the user's screen can only show so many at a time, and the server has to serialize and send data that will never be seen.
+
+Pagination solves this by splitting results into pages. The client asks for "page 1 with 10 items per page", gets back 10 results plus some metadata about how many total pages exist, and can then ask for page 2 when the user scrolls.
+
+### Adding the Parameters
+
+Add `page` and `limit` to the function signature:
+
+```diff title="matches.py"
+def list_matches(
+    # ... existing filters ...
++   page: int = 1,
++   limit: int = 10,
+):
+```
+
+- `page` — which page the user wants. Defaults to `1` (the first page).
+- `limit` — how many items per page. Defaults to `10`.
+
+Both have sensible defaults, so existing callers who don't send these parameters still get results — the first 10 matches.
+
+### Replacing the Return Statement
+
+Currently, the function just returns `matches`. Replace that with pagination logic:
+
+```diff title="matches.py"
+- return matches
++ total = len(matches)
++ total_pages = math.ceil(total / limit)
++ start = (page - 1) * limit
++ end = start + limit
++ return {
++     "total": total,
++     "page": page,
++     "limit": limit,
++     "total_pages": total_pages,
++     "matches": matches[start:end],
++ }
+```
+
+You also need to import `math` at the top of the file:
+
+```diff title="matches.py"
++ import math
+```
+
+<Callout type="info" title="Breaking Down the Pagination Math">
+  Let's walk through what happens when a user requests page 2 with 10 items per page:
+
+  ```python
+  page  = 2
+  limit = 10
+
+  start = (2 - 1) * 10 = 10   # skip the first 10 items (page 1)
+  end   = 10 + 10       = 20   # stop after 10 more items
+
+  matches[10:20]               # Python slice — items at index 10 through 19
+  ```
+
+  Page numbers are **1-indexed** (humans count from 1) but Python list indices are **0-indexed** (computers count from 0). The `(page - 1)` converts between the two.
+
+  For `total_pages`, we use `math.ceil` to round up. If there are 25 matches and 10 per page, that's 2.5 pages — which means 3 pages, with the last one only partially full.
+</Callout>
+
+### What the Response Looks Like
+
+The response now includes metadata alongside the results:
+
+```json
+{
+  "total": 25,
+  "page": 2,
+  "limit": 10,
+  "total_pages": 3,
+  "matches": [
+    { "id": 11, "home_team": "Arsenal", ... },
+    { "id": 12, "home_team": "Lakers", ... },
+    ...
+  ]
+}
+```
+
+Clients can use `total`, `page`, and `total_pages` to build a page selector UI — knowing they're on page 2 of 3, with 25 total results.
+
+---
+
+## Step 3 — Add Sorting
+
+### Why Sorting Matters
+
+Pagination alone is not enough — results come back in whatever order they happen to be stored in. A user browsing upcoming matches probably wants them sorted by date. A user looking at all football matches might want them sorted alphabetically by team name. Without sorting, the first page of results is essentially random.
+
+### Adding the Sort Parameters
+
+We define two enums to represent the valid sort options — this prevents users from sending arbitrary field names that don't exist on the model:
+
+```diff title="matches.py"
++ class SortBy(str, Enum):
++     date = "date"
++     sport = "sport"
++     status = "status"
++     home_team = "home_team"
+
++ class SortOrder(str, Enum):
++     asc = "asc"
++     desc = "desc"
+```
+
+`SortBy` lists which fields a user is allowed to sort by. `SortOrder` controls direction — ascending (smallest first) or descending (largest first).
+
+Add them to the function signature:
+
+```diff title="matches.py"
+def list_matches(
+    # ... existing filters ...
+    page: int = 1,
+    limit: int = 10,
++   sort_by: Optional[SortBy] = None,
++   sort_order: SortOrder = SortOrder.asc,
+):
+```
+
+`sort_by` is `Optional` because sorting is not required — if the user doesn't send it, results come back in their natural order. `sort_order` always has a value, defaulting to ascending.
+
+### Applying the Sort
+
+Sorting must happen **after filtering** but **before pagination**. If you paginate first and then sort, each page gets sorted independently, which scrambles the results across pages.
+
+Add the sort logic right before the pagination block:
+
+```diff title="matches.py"
++ if sort_by:
++     reverse = sort_order == SortOrder.desc
++     matches.sort(key=attrgetter(sort_by), reverse=reverse)
+
+  total = len(matches)
+  total_pages = math.ceil(total / limit)
+  ...
+```
+
+You also need to import `attrgetter` at the top:
+
+```diff title="matches.py"
++ from operator import attrgetter
+```
+
+<Callout type="info" title="What is attrgetter?">
+  `attrgetter` is a function from Python's `operator` module. It takes a field name as a string and returns a callable that extracts that field from any object.
+
+  ```python
+  attrgetter("date")        # equivalent to: lambda m: m.date
+  attrgetter("home_team")   # equivalent to: lambda m: m.home_team
+  ```
+
+  We use it instead of a plain `lambda` because it handles enum-typed fields correctly. When a field's value is an enum (like `m.sport` which is `Sport.football`), `attrgetter` knows how to compare them, whereas `lambda m: getattr(m, sort_by)` can behave unexpectedly.
+
+  The `reverse` flag is just a boolean — `True` means descending, `False` means ascending. `sort_order == SortOrder.desc` evaluates to `True` when the user asked for descending.
+</Callout>
+
+### The Order of Operations
+
+The complete end of the function now follows this exact sequence:
+
+```python title="matches.py"
+    # 1. Guard: no results found
+    if not matches:
+        return {"message": "No matches found for the given filters."}
+
+    # 2. Sort (operates on the full filtered list)
+    if sort_by:
+        reverse = sort_order == SortOrder.desc
+        matches.sort(key=attrgetter(sort_by), reverse=reverse)
+
+    # 3. Paginate (slices the sorted list)
+    total = len(matches)
+    total_pages = math.ceil(total / limit)
+    start = (page - 1) * limit
+    end = start + limit
+    return {
+        "total": total,
+        "page": page,
+        "limit": limit,
+        "total_pages": total_pages,
+        "matches": matches[start:end],
+    }
+```
+
+This order is important: filter → sort → paginate. Doing it in any other order gives wrong results.
+
+---
+
+## Sorting on Enum Fields
+
+Our `sport` and `status` fields are enums. When you sort by an enum field, Python compares the **string values** of each member alphabetically.
+
+For example, sorting all matches by `status` ascending gives:
+
+```
+abandoned → cancelled → completed → upcoming
+```
+
+Because alphabetically, `"abandoned"` comes before `"cancelled"`, which comes before `"completed"`, and so on. For many cases this is perfectly fine. But sometimes alphabetical order doesn't match the logical order of your data.
+
+Consider match statuses — they represent stages in a lifecycle. You might want to show `upcoming` matches first (most relevant to users), then `completed`, then the terminal states:
+
+```
+upcoming → completed → cancelled → abandoned
+```
+
+That ordering makes no sense alphabetically, but it makes complete sense for the application.
+
+### Defining a Custom Sort Order
+
+The solution is a simple dictionary that maps each enum member to a priority number:
+
+```python title="matches.py"
+STATUS_ORDER = {
+    Status.upcoming:  1,
+    Status.completed: 2,
+    Status.cancelled: 3,
+    Status.abandoned: 4,
+}
+
+matches.sort(key=lambda m: STATUS_ORDER[m.status])
+```
+
+Instead of comparing `m.status` values directly (which would sort alphabetically), we look each one up in `STATUS_ORDER` and sort by the number we get back. `1` sorts before `2`, so `upcoming` sorts before `completed`, exactly as intended.
+
+The same pattern applies to any enum:
+
+```python title="matches.py"
+SPORT_ORDER = {
+    Sport.football:   1,
+    Sport.cricket:    2,
+    Sport.basketball: 3,
+    Sport.baseball:   4,
+    Sport.hockey:     5,
+}
+
+matches.sort(key=lambda m: SPORT_ORDER[m.sport])
+```
+
+<Callout type="info" title="When to Use Custom Order">
+  Default alphabetical sorting is fine for most enums. Use a custom priority map when the enum values represent stages, priorities, or categories that have a meaningful order which doesn't happen to be alphabetical. Good candidates are status fields, severity levels, or any ordered category.
+</Callout>
+
+---
+
+## What's Next
+
+We now have a complete **GET** endpoint with date range filtering, sorting, and pagination. In the next lesson, we'll explore **query parameter validation** with FastAPI's `Query()` to add constraints, documentation, and better error messages to our filters.
+
+<CopyFinalCode code={_fc} />

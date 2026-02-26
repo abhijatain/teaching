@@ -1,0 +1,514 @@
+---
+title: Request Body Field Validation
+description: Apply the same validation techniques you've learned to request body fields using Pydantic's Field.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { CopyFinalCode } from '@/components/copy-final-code';
+
+export const _fc = `from datetime import date
+from enum import Enum
+from typing import Annotated, List, Literal, Optional
+
+from fastapi import FastAPI, Path, Query
+from pydantic import BaseModel, Field, model_validator
+
+app = FastAPI(title="Sports Matches API")
+
+
+class Sport(str, Enum):
+    football = "football"
+    cricket = "cricket"
+    hockey = "hockey"
+    basketball = "basketball"
+    baseball = "baseball"
+
+
+class Status(str, Enum):
+    upcoming = "upcoming"
+    cancelled = "cancelled"
+    abandoned = "abandoned"
+    completed = "completed"
+
+
+class Winner(str, Enum):
+    home_team = "home_team"
+    away_team = "away_team"
+    draw = "draw"
+
+
+class Match(BaseModel):
+    id: int
+    home_team: str = Field(min_length=2, max_length=50)
+    away_team: str = Field(min_length=2, max_length=50)
+    venue: Optional[str] = Field(None, min_length=3, max_length=100)
+    date: date
+    sport: Sport
+    status: Status
+    winner: Optional[Winner] = None
+    score_home: Optional[int] = Field(None, ge=0, description="Home team score")
+    score_away: Optional[int] = Field(None, ge=0, description="Away team score")
+
+
+class MatchFilters(BaseModel):
+    sport: Optional[Literal["football", "cricket", "hockey", "basketball", "baseball"]] = None
+    status: Optional[Literal["upcoming", "cancelled", "abandoned", "completed"]] = None
+    winner: Optional[Literal["home_team", "away_team", "draw"]] = None
+    team: Optional[str] = Field(None, min_length=3, max_length=50,
+                                description="Filter by team name (case-insensitive partial match)")
+
+
+class DateRangeFilters(BaseModel):
+    from_date: Optional[date] = Field(None, description="Matches on or after this date (YYYY-MM-DD)")
+    to_date: Optional[date] = Field(None, description="Matches on or before this date (YYYY-MM-DD)")
+
+    @model_validator(mode='after')
+    def validate_date_range(self):
+        if self.from_date and self.to_date:
+            if self.from_date > self.to_date:
+                raise ValueError("from_date must be before or equal to to_date")
+        return self
+
+
+class PaginationParams(BaseModel):
+    page: int = Field(1, ge=1, description="Page number (1-indexed)")
+    limit: int = Field(20, ge=1, le=100, description="Items per page (max 100)")
+
+
+INITIAL_DATA: List[Match] = [
+    Match(id=1, home_team="Arsenal", away_team="Chelsea", sport=Sport.football,
+          date=date(2025, 10, 21), status=Status.completed, winner=Winner.draw,
+          venue="Emirates Stadium"),
+    Match(id=2, home_team="Lakers", away_team="Warriors", sport=Sport.basketball,
+          date=date(2025, 11, 15), status=Status.completed, winner=Winner.home_team,
+          venue="Crypto.com Arena"),
+    Match(id=3, home_team="Real Madrid", away_team="Barcelona", sport=Sport.football,
+          date=date(2026, 4, 10), status=Status.completed, winner=Winner.draw,
+          venue="Santiago Bernabeu"),
+    Match(id=4, home_team="Knicks", away_team="Celtics", sport=Sport.basketball,
+          date=date(2026, 3, 5), status=Status.upcoming, winner=None,
+          venue="Madison Square Garden"),
+    Match(id=5, home_team="Yankees", away_team="Red Sox", sport=Sport.baseball,
+          date=date(2025, 8, 10), status=Status.abandoned, winner=None,
+          venue="Yankee Stadium"),
+    Match(id=6, home_team="India", away_team="Pakistan", sport=Sport.cricket,
+          date=date(2026, 3, 24), status=Status.completed, winner=Winner.home_team,
+          venue="Narendra Modi Stadium"),
+    Match(id=7, home_team="Lakers", away_team="Warriors", sport=Sport.basketball,
+          date=date(2025, 1, 15), status=Status.completed, winner=Winner.away_team,
+          venue="Crypto.com Arena"),
+]
+
+
+@app.get("/health", tags=["System"])
+def health_check():
+    return {"status": "ok"}
+
+
+@app.get("/matches", tags=["Matches"])
+def list_matches(
+    filters: Annotated[MatchFilters, Query()],
+    date_range: Annotated[DateRangeFilters, Query()],
+    pagination: Annotated[PaginationParams, Query()],
+):
+    matches = list(INITIAL_DATA)
+
+    if filters.sport:
+        matches = [m for m in matches if m.sport.value == filters.sport]
+    if filters.status:
+        matches = [m for m in matches if m.status.value == filters.status]
+    if filters.winner:
+        matches = [m for m in matches if m.winner and m.winner.value == filters.winner]
+    if filters.team:
+        team_lower = filters.team.lower()
+        matches = [m for m in matches if
+                   team_lower in m.home_team.lower() or team_lower in m.away_team.lower()]
+
+    if date_range.from_date:
+        matches = [m for m in matches if m.date >= date_range.from_date]
+    if date_range.to_date:
+        matches = [m for m in matches if m.date <= date_range.to_date]
+
+    total = len(matches)
+    start = (pagination.page - 1) * pagination.limit
+    paginated = matches[start:start + pagination.limit]
+
+    return {"total": total, "page": pagination.page,
+            "limit": pagination.limit, "results": paginated}
+
+
+@app.get("/matches/{match_id}", tags=["Matches"])
+def get_match_by_id(
+    match_id: Annotated[
+        int,
+        Path(ge=1, title="Match ID",
+             description="The unique identifier of the match (must be positive)"),
+    ],
+):
+    for match in INITIAL_DATA:
+        if match.id == match_id:
+            return match
+    return {"error": "Match not found"}
+
+
+@app.post("/matches", tags=["Matches"])
+def create_match(match: Match):
+    if match.status is Status.upcoming and match.date < date.today():
+        return {"error": "Upcoming match date cannot be in the past."}
+    if match.status is not Status.completed and match.winner is not None:
+        return {"error": "Status should be Completed to have a winner"}
+    if match.home_team == match.away_team:
+        return {"error": "Both teams cannot have the same name."}
+    if match.winner is None and match.status is Status.completed:
+        return {"error": "Winner cannot be None if match is completed"}
+    match.id = INITIAL_DATA[-1].id + 1
+    INITIAL_DATA.append(match)
+    return match
+`;
+
+# Request Body Field Validation
+
+In the last two lessons we used `Query` and `Path` to validate parameters that come from the URL. Now it's time to apply the same techniques to request body fields — data sent in the body of POST, PUT, or PATCH requests.
+
+You've already been using request bodies (the `Match` model in your POST endpoint), but without field-level validation. In this lesson, we'll add constraints to those fields using Pydantic's `Field` — which works exactly like `Query` and `Path`, just for model attributes instead.
+
+---
+
+## Where We Are
+
+Your current `Match` model looks like this:
+
+```python title="matches.py"
+class Match(BaseModel):
+    id: int
+    home_team: str
+    away_team: str
+    venue: Optional[str] = None
+    date: date
+    sport: Sport
+    status: Status
+    winner: Optional[Winner] = None
+```
+
+FastAPI validates types automatically — `home_team` must be a string, `date` must be a date, `sport` must match one of the enum values. But there are no constraints on the actual values:
+
+- `home_team` could be an empty string `""`
+- `home_team` could be 500 characters long
+- `venue` could be a single character `"A"`
+
+These would all pass validation and reach your endpoint.
+
+<Callout type="warn" title="The Same Problem We Solved for Query and Path">
+  Just like with query and path parameters, type checking alone isn't enough. You need constraints on length, range, and format — and you need them to run automatically before your function executes.
+</Callout>
+
+---
+
+## Step 1 — Import Field
+
+`Field` is the counterpart to `Query` and `Path`, but for Pydantic model attributes. Import it from `pydantic` (not `fastapi`):
+
+```diff title="matches.py"
+  from fastapi import FastAPI, Path, Query
+- from pydantic import BaseModel, model_validator
++ from pydantic import BaseModel, Field, model_validator
+```
+
+<Callout type="info" title="Where Field Comes From">
+  - `Query` and `Path` come from `fastapi` — they're FastAPI's wrappers
+  - `Field` comes from `pydantic` — it's a core Pydantic feature
+  
+  This is the one difference in import location. The syntax and parameters are otherwise identical.
+</Callout>
+
+---
+
+## Step 2 — Add Length Constraints to Team Names
+
+Apply `Field` to `home_team` and `away_team` with the same `min_length` and `max_length` parameters we used on query parameters:
+
+```diff title="matches.py"
+  class Match(BaseModel):
+      id: int
+-     home_team: str
++     home_team: str = Field(min_length=2, max_length=50)
+-     away_team: str
++     away_team: str = Field(min_length=2, max_length=50)
+      venue: Optional[str] = None
+      date: date
+      sport: Sport
+      status: Status
+      winner: Optional[Winner] = None
+```
+
+Now try creating a match with an empty team name. In your terminal:
+
+```bash
+curl -X POST "http://localhost:8000/matches" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "home_team": "",
+    "away_team": "Chelsea",
+    "sport": "football",
+    "date": "2026-03-15",
+    "status": "upcoming"
+  }'
+```
+
+Response — automatically from Pydantic, before your function runs:
+
+```json title="Validation error"
+{
+  "detail": [
+    {
+      "loc": ["body", "home_team"],
+      "msg": "ensure this value has at least 2 characters",
+      "type": "value_error.any_str.min_length",
+      "ctx": {"limit_value": 2}
+    }
+  ]
+}
+```
+
+Notice `"loc": ["body", "home_team"]` — compare this to the errors from previous lessons where it said `"loc": ["query", "page"]` or `"loc": ["path", "match_id"]`. Same structure, just a different source location.
+
+---
+
+## Step 3 — Add Constraints to Optional Fields
+
+For optional fields like `venue`, you still provide a default of `None`, but can add constraints that apply when a value is provided:
+
+```diff title="matches.py"
+  class Match(BaseModel):
+      id: int
+      home_team: str = Field(min_length=2, max_length=50)
+      away_team: str = Field(min_length=2, max_length=50)
+-     venue: Optional[str] = None
++     venue: Optional[str] = Field(None, min_length=3, max_length=100)
+      date: date
+      sport: Sport
+      status: Status
+      winner: Optional[Winner] = None
+```
+
+Breaking down the syntax:
+
+```python title="Understanding Field with Optional"
+venue: Optional[str] = Field(None, min_length=3, max_length=100)
+                            ^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                            |     Constraints apply when value is provided
+                            Default value (field is optional)
+```
+
+Now:
+- If `venue` is omitted or explicitly `null` → accepted
+- If `venue` is provided but less than 3 characters → rejected
+- If `venue` is provided and 3-100 characters → accepted
+
+Try this:
+
+```bash
+curl -X POST "http://localhost:8000/matches" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "home_team": "Arsenal",
+    "away_team": "Chelsea",
+    "venue": "A",
+    "sport": "football",
+    "date": "2026-03-15",
+    "status": "upcoming"
+  }'
+```
+
+Response:
+
+```json title="Validation error"
+{
+  "detail": [
+    {
+      "loc": ["body", "venue"],
+      "msg": "ensure this value has at least 3 characters",
+      "type": "value_error.any_str.min_length",
+      "ctx": {"limit_value": 3}
+    }
+  ]
+}
+```
+
+---
+
+## Step 4 — Add Score Fields with Numeric Constraints
+
+Let's add two new optional fields to track match scores:
+
+```diff title="matches.py"
+  class Match(BaseModel):
+      id: int
+      home_team: str = Field(min_length=2, max_length=50)
+      away_team: str = Field(min_length=2, max_length=50)
+      venue: Optional[str] = Field(None, min_length=3, max_length=100)
+      date: date
+      sport: Sport
+      status: Status
+      winner: Optional[Winner] = None
++     score_home: Optional[int] = Field(None, ge=0, description="Home team score")
++     score_away: Optional[int] = Field(None, ge=0, description="Away team score")
+```
+
+`ge=0` means "greater than or equal to 0" — the exact same constraint we used on `page` in lesson 2. Scores can't be negative.
+
+The `description` parameter shows up in the auto-generated docs just like it did for `Query` and `Path`. Visit `http://localhost:8000/docs`, click on `POST /matches`, and look at the request body schema — you'll see the description next to each score field.
+
+---
+
+## Query, Path, and Field — A Comparison
+
+You now know all three validation functions. They work identically — same syntax, same constraint options, same documentation fields. The only difference is what they validate:
+
+| | `Query` | `Path` | `Field` |
+|--|---------|--------|---------|
+| **Where the value comes from** | URL query string — `?page=2` | URL path — `/matches/{match_id}` | Request body — JSON sent in POST/PUT/PATCH |
+| **Used in** | Endpoint function parameters | Endpoint function parameters | Pydantic model attributes |
+| **Syntax** | `param: Annotated[int, Query(ge=1)]` | `param: Annotated[int, Path(ge=1)]` | `field: int = Field(ge=1)` |
+| **Error location** | `"loc": ["query", ...]` | `"loc": ["path", ...]` | `"loc": ["body", ...]` |
+| **Import from** | `fastapi` | `fastapi` | `pydantic` |
+
+The validation options are identical across all three:
+
+| Constraint | Meaning | Works With |
+|-----------|---------|-----------|
+| `min_length=3` | At least 3 characters | Query, Path, Field |
+| `max_length=50` | At most 50 characters | Query, Path, Field |
+| `ge=1` | Greater than or equal to 1 | Query, Path, Field |
+| `gt=0` | Greater than 0 | Query, Path, Field |
+| `le=100` | Less than or equal to 100 | Query, Path, Field |
+| `lt=101` | Less than 101 | Query, Path, Field |
+| `pattern="^[A-Z]"` | Regex pattern | Query, Path, Field |
+| `description="..."` | Documentation text | Query, Path, Field |
+
+<Callout type="info" title="One Syntax to Rule Them All">
+  Learn the constraint options once, use them everywhere. Whether you're validating a query parameter, a path parameter, or a request body field, the same options apply. This is intentional — FastAPI and Pydantic share the same validation layer.
+</Callout>
+
+---
+
+## What Field Can't Validate
+
+Just like `Query` and `Path`, `Field` validates individual fields but not relationships between them. For example, look at the checks in your current POST endpoint:
+
+```python title="matches.py"
+@app.post("/matches", tags=["Matches"])
+def create_match(match: Match):
+    if match.status is Status.upcoming and match.date < date.today():  # !mark
+        return {"error": "Upcoming match date cannot be in the past."}
+    if match.status is not Status.completed and match.winner is not None:  # !mark
+        return {"error": "Status should be Completed to have a winner"}
+    if match.home_team == match.away_team:  # !mark
+        return {"error": "Both teams cannot have the same name."}
+    if match.winner is None and match.status is Status.completed:  # !mark
+        return {"error": "Winner cannot be None if match is completed"}
+    # ...
+```
+
+Each highlighted line checks a relationship between two fields — the kind of check `Field` can't do because it validates fields in isolation.
+
+You've seen the solution in lesson 4: `@model_validator`. Here's how you'd move one of these checks into the model:
+
+```python title="matches.py"
+class Match(BaseModel):
+    id: int
+    home_team: str = Field(min_length=2, max_length=50)
+    away_team: str = Field(min_length=2, max_length=50)
+    venue: Optional[str] = Field(None, min_length=3, max_length=100)
+    date: date
+    sport: Sport
+    status: Status
+    winner: Optional[Winner] = None
+    score_home: Optional[int] = Field(None, ge=0, description="Home team score")
+    score_away: Optional[int] = Field(None, ge=0, description="Away team score")
+
+    @model_validator(mode='after')  # !mark
+    def check_teams_different(self):  # !mark
+        if self.home_team == self.away_team:  # !mark
+            raise ValueError("Both teams cannot have the same name.")  # !mark
+        return self  # !mark
+```
+
+Now that check runs automatically when the model is created — same behavior as the manual `if` statement, but the validation logic lives with the model instead of scattered across endpoint functions.
+
+<Callout type="warn" title="The Same Two Layers Apply">
+  **Pydantic via `Field`** validates individual field types and ranges. **Your code via `@model_validator`** validates relationships between fields. This is the same pattern we saw with `Query` in lesson 2 and applied to query parameter models in lesson 4 — it doesn't change just because we're now working with request bodies.
+</Callout>
+
+---
+
+## Combining Path, Query, and Body Parameters
+
+You can mix all three in the same endpoint — each carries its own validation:
+
+```python title="matches.py - hypothetical example"
+@app.patch("/matches/{match_id}", tags=["Matches"])
+def update_match(
+    match_id: Annotated[int, Path(ge=1)],          # path parameter
+    include_history: Annotated[bool, Query()] = False,  # query parameter
+    update: MatchUpdate,                            # body parameter
+):
+    # FastAPI validates:
+    # - match_id must be >= 1 (from path)
+    # - include_history must be boolean (from query)
+    # - update fields must pass Field constraints (from body)
+    ...
+```
+
+FastAPI validates all three independently before your function runs. If any validation fails, the request is rejected with a clear error message.
+
+---
+
+## What You've Learned
+
+```python title="Three ways to validate, same syntax"
+# Query parameter validation
+page: Annotated[int, Query(ge=1, le=100)]
+
+# Path parameter validation
+match_id: Annotated[int, Path(ge=1)]
+
+# Body field validation
+home_team: str = Field(min_length=2, max_length=50)
+```
+
+The constraint options are identical:
+- String: `min_length`, `max_length`, `pattern`
+- Numeric: `ge`, `gt`, `le`, `lt`
+- Documentation: `description`, `title`, `examples`
+
+The error format is identical:
+```json
+{
+  "loc": ["query|path|body", "field_name"],
+  "msg": "validation message",
+  "type": "error_type"
+}
+```
+
+And the two-layer pattern is identical:
+1. `Query`, `Path`, or `Field` validates individual parameters
+2. Manual checks or `@model_validator` validates relationships
+
+<Callout type="info" title="One Pattern, Applied Everywhere">
+  By now you should see the consistency: FastAPI and Pydantic use the same validation system whether the data comes from the URL path, the query string, or the request body. Learn it once, apply it everywhere.
+</Callout>
+
+---
+
+## What's Next
+
+You now know how to validate every kind of input to your API:
+- ✅ Query parameters with `Query`
+- ✅ Path parameters with `Path`
+- ✅ Request body fields with `Field`
+- ✅ Cross-parameter relationships with `@model_validator`
+
+In a real production API, you'll need a few more pieces — proper error responses, database persistence instead of an in-memory list, authentication, and deployment configuration. But the validation foundation you've built in these five lessons is exactly what you'll use in that production code. The patterns don't change as the system grows — they scale.
+
+<CopyFinalCode code={_fc} />

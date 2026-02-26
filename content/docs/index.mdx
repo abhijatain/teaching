@@ -1,13 +1,428 @@
 ---
-title: Hello World
-description: Your first document
+title: FastAPI from Zero to Production
+description: Master FastAPI from your first endpoint to deploying production-ready systems with confidence.
 ---
 
-Welcome to the docs! You can start writing documents in `/content/docs`.
+import { Card, Cards } from 'fumadocs-ui/components/card';
+import { Callout } from 'fumadocs-ui/components/callout';
 
-## What is Next?
+# Welcome to FastAPI Mastery
 
+Learn to build production-ready APIs from scratch. No prior FastAPI experience required — we'll take you from writing your first endpoint to deploying a complete, secure, validated, and documented API system.
+
+## Your Learning Journey
+
+This comprehensive course takes you through every essential aspect of modern API development:
+
+```mermaid
+graph LR
+    A[Hello World] --> B[Input Validation]
+    B --> C[Database & ORM]
+    C --> D[Authentication]
+    D --> E[Testing]
+    E --> F[Deployment]
+    F --> G[Production Ready]
+```
+
+By the end, you'll have built a complete sports management API with:
+- ✅ Bulletproof input validation
+- ✅ PostgreSQL database with proper migrations
+- ✅ JWT authentication and authorization
+- ✅ Comprehensive test coverage
+- ✅ Auto-generated interactive documentation
+- ✅ Production deployment on modern infrastructure
+
+## What Makes This Course Different
+
+**Zero to Production** — We don't just teach FastAPI features. We teach you how to build systems that can handle real users, real data, and real problems.
+
+**Code Continuity** — Every module builds on the previous one. You're not starting over each lesson — you're evolving a single codebase from simple to sophisticated.
+
+**Production Patterns** — Learn the patterns used by companies shipping FastAPI in production, not just toy examples. We cover error handling, logging, monitoring, and deployment from day one.
+
+**Hands-On Projects** — Build a real API (sports matches management system) that demonstrates every concept in a practical context.
+
+**Best Practices Built In** — Learn the right way from the start. We show you why certain patterns exist before teaching you shortcuts.
+
+## Course Modules
+
+### Module 1: FastAPI Fundamentals
 <Cards>
-  <Card title="Learn more about Next.js" href="https://nextjs.org/docs" />
-  <Card title="Learn more about Fumadocs" href="https://fumadocs.dev" />
+  <Card 
+    title="Getting Started" 
+    href="/docs/getting-started"
+    description="Install FastAPI, create your first endpoint, understand automatic docs"
+  />
+  <Card 
+    title="Request & Response" 
+    href="/docs/request-response"
+    description="Path parameters, query parameters, request bodies, and status codes"
+  />
+  <Card 
+    title="Data Models" 
+    href="/docs/data-models"
+    description="Pydantic models for request/response validation and serialization"
+  />
 </Cards>
+
+### Module 2: Input Validation Mastery
+<Cards>
+  <Card 
+    title="Query Parameters" 
+    href="/docs/query-parameters"
+    description="Add constraints to URL query parameters using Query class"
+  />
+  <Card 
+    title="Path Validation" 
+    href="/docs/path-validation"
+    description="Validate path parameters and IDs with the same patterns"
+  />
+  <Card 
+    title="Query Parameter Models" 
+    href="/docs/query-parameter-model"
+    description="Group related parameters into reusable Pydantic models"
+  />
+  <Card 
+    title="Body Field Validation" 
+    href="/docs/body-field-validation"
+    description="Apply validation to request body fields using Field"
+  />
+  <Card 
+    title="Nested Models" 
+    href="/docs/nested-models"
+    description="Build complex hierarchical data with validation at every level"
+  />
+  <Card 
+    title="Request Examples" 
+    href="/docs/request-examples"
+    description="Improve API docs with realistic examples for users"
+  />
+</Cards>
+
+### Module 3: Database Integration
+<Cards>
+  <Card 
+    title="Database Setup" 
+    href="/docs/database-setup"
+    description="Set up PostgreSQL and SQLAlchemy ORM for data persistence"
+  />
+  <Card 
+    title="Models & Migrations" 
+    href="/docs/models-migrations"
+    description="Define database models and manage schema changes with Alembic"
+  />
+  <Card 
+    title="CRUD Operations" 
+    href="/docs/crud-operations"
+    description="Create, Read, Update, Delete patterns with proper error handling"
+  />
+  <Card 
+    title="Relationships" 
+    href="/docs/database-relationships"
+    description="Model complex relationships: one-to-many, many-to-many"
+  />
+  <Card 
+    title="Query Optimization" 
+    href="/docs/query-optimization"
+    description="Write efficient queries, avoid N+1 problems, use eager loading"
+  />
+</Cards>
+
+### Module 4: Authentication & Security
+<Cards>
+  <Card 
+    title="Password Hashing" 
+    href="/docs/password-hashing"
+    description="Securely store passwords with bcrypt and best practices"
+  />
+  <Card 
+    title="JWT Tokens" 
+    href="/docs/jwt-tokens"
+    description="Implement JSON Web Tokens for stateless authentication"
+  />
+  <Card 
+    title="OAuth2 & Scopes" 
+    href="/docs/oauth2-scopes"
+    description="Add OAuth2 with permission scopes for fine-grained access control"
+  />
+  <Card 
+    title="API Keys" 
+    href="/docs/api-keys"
+    description="Implement API key authentication for service-to-service calls"
+  />
+  <Card 
+    title="CORS & Security Headers" 
+    href="/docs/cors-security"
+    description="Configure CORS, CSP, and other security headers properly"
+  />
+</Cards>
+
+### Module 5: Testing
+<Cards>
+  <Card 
+    title="Testing Fundamentals" 
+    href="/docs/testing-fundamentals"
+    description="Set up pytest, write your first API tests, understand fixtures"
+  />
+  <Card 
+    title="Database Testing" 
+    href="/docs/database-testing"
+    description="Test database operations with transactions and test databases"
+  />
+  <Card 
+    title="Mocking & Fixtures" 
+    href="/docs/mocking-fixtures"
+    description="Mock external services, create reusable test fixtures"
+  />
+  <Card 
+    title="Coverage & CI" 
+    href="/docs/coverage-ci"
+    description="Measure test coverage and integrate with CI/CD pipelines"
+  />
+</Cards>
+
+### Module 6: Advanced Patterns
+<Cards>
+  <Card 
+    title="Background Tasks" 
+    href="/docs/background-tasks"
+    description="Process long-running operations without blocking requests"
+  />
+  <Card 
+    title="Dependency Injection" 
+    href="/docs/dependency-injection"
+    description="Use FastAPI's dependency system for clean, testable code"
+  />
+  <Card 
+    title="Error Handling" 
+    href="/docs/error-handling"
+    description="Custom exception handlers, consistent error responses"
+  />
+  <Card 
+    title="Middleware" 
+    href="/docs/middleware"
+    description="Add logging, timing, and custom processing to all requests"
+  />
+  <Card 
+    title="WebSockets" 
+    href="/docs/websockets"
+    description="Real-time bidirectional communication for live updates"
+  />
+</Cards>
+
+### Module 7: Performance & Scaling
+<Cards>
+  <Card 
+    title="Caching Strategies" 
+    href="/docs/caching"
+    description="Redis caching, cache invalidation, and performance wins"
+  />
+  <Card 
+    title="Rate Limiting" 
+    href="/docs/rate-limiting"
+    description="Protect your API from abuse with rate limiting"
+  />
+  <Card 
+    title="Database Connection Pools" 
+    href="/docs/connection-pools"
+    description="Optimize database connections for high traffic"
+  />
+  <Card 
+    title="Async Patterns" 
+    href="/docs/async-patterns"
+    description="Leverage async/await for concurrent operations"
+  />
+</Cards>
+
+### Module 8: Production Deployment
+<Cards>
+  <Card 
+    title="Docker & Containers" 
+    href="/docs/docker"
+    description="Containerize your application for consistent deployments"
+  />
+  <Card 
+    title="Environment Config" 
+    href="/docs/environment-config"
+    description="Manage secrets and config across dev/staging/production"
+  />
+  <Card 
+    title="Logging & Monitoring" 
+    href="/docs/logging-monitoring"
+    description="Structured logging, metrics, and error tracking in production"
+  />
+  <Card 
+    title="CI/CD Pipelines" 
+    href="/docs/cicd"
+    description="Automate testing, building, and deployment"
+  />
+  <Card 
+    title="Cloud Deployment" 
+    href="/docs/cloud-deployment"
+    description="Deploy to AWS, GCP, or Azure with proper infrastructure"
+  />
+  <Card 
+    title="Health Checks & Zero-Downtime" 
+    href="/docs/health-checks"
+    description="Implement health endpoints and graceful shutdown"
+  />
+</Cards>
+
+## Prerequisites
+
+**Required:**
+- Python 3.10+ installed
+- Basic Python knowledge (variables, functions, classes)
+- Understanding of HTTP basics (requests, responses, status codes)
+- Comfortable with command line/terminal
+
+**Helpful but not required:**
+- Experience with any web framework (Flask, Django, Express, etc.)
+- Basic SQL knowledge
+- Git for version control
+- Docker basics
+
+<Callout type="info">
+Don't have all prerequisites? That's okay! We explain concepts as we go and provide resources for learning the fundamentals when needed.
+</Callout>
+
+## What You'll Build
+
+Throughout this course, you'll build a **Sports Matches Management API** with progressively more features:
+
+**By Module 2:** Basic CRUD API with comprehensive input validation
+```bash
+POST /matches    # Create matches with validated data
+GET  /matches    # List matches with filters, pagination, sorting
+GET  /matches/1  # Get single match with all details
+```
+
+**By Module 3:** Persistent storage with PostgreSQL
+```bash
+# Data stored in database, not in-memory
+# Relationships between matches, teams, players
+# Efficient queries with proper indexes
+```
+
+**By Module 4:** Secure authentication
+```bash
+POST /auth/register  # User registration
+POST /auth/login     # JWT token generation
+GET  /me            # Protected route requiring auth
+```
+
+**By Module 5:** Fully tested
+```bash
+# 80%+ test coverage
+# Unit tests, integration tests, end-to-end tests
+# CI pipeline running tests on every commit
+```
+
+**By Module 6:** Production-ready features
+```bash
+# Background processing for complex operations
+# WebSocket updates for live match scores
+# Proper error handling and logging
+# Rate limiting and caching
+```
+
+**By Module 8:** Deployed and monitored
+```bash
+# Dockerized application
+# Deployed to cloud infrastructure
+# Monitoring and alerting
+# Zero-downtime deployments
+```
+
+## Learning Path
+
+**If you're brand new to FastAPI:**
+Start with Module 1 and work through sequentially. Don't skip modules — each builds essential skills.
+
+**If you know FastAPI basics:**
+You might skip Module 1, but we recommend at least skimming it. We introduce patterns and conventions used throughout the course.
+
+**If you're experienced with FastAPI:**
+Jump to specific modules that interest you. Each module can stand alone, but you'll get the most value from seeing how patterns evolve across the course.
+
+## How to Use This Course
+
+**1. Work Through Modules in Order**
+Each module assumes knowledge from previous ones. The code evolves continuously.
+
+**2. Type the Code Yourself**
+Reading code and typing code create different neural pathways. Type it.
+
+**3. Complete the Exercises**
+Every lesson has exercises. They're not optional — they reinforce learning through practice.
+
+**4. Break Things Intentionally**
+Try removing validation. See what happens. Understanding failure modes is crucial.
+
+**5. Build Your Own Project Alongside**
+Apply concepts to your own API idea. The best learning comes from solving your own problems.
+
+**6. Join the Community**
+Ask questions, share your progress, help others. Teaching is the best way to solidify knowledge.
+
+## Course Philosophy
+
+**Production-First Mindset**
+We don't teach you FastAPI features in isolation. We teach you how to build systems that work in production — with users, at scale, with real consequences for downtime.
+
+**Patterns Over Code**
+You'll learn patterns that apply beyond FastAPI. These same validation, security, and testing patterns work in any framework or language.
+
+**Progressive Complexity**
+We start simple and add complexity only when needed. You'll understand *why* each pattern exists, not just *how* to use it.
+
+**Real-World Focus**
+Every example comes from real production scenarios. You won't waste time on contrived examples that don't translate to actual work.
+
+## Ready to Begin?
+
+Start with [Module 1: Getting Started](/docs/getting-started) where you'll install FastAPI, write your first endpoint, and see the auto-generated documentation that makes FastAPI special.
+
+<Callout type="warn" title="Time Investment">
+This is a comprehensive course. Plan for 40-60 hours of focused learning to complete all modules. But you'll be productive after the first few hours, and each module adds production-ready skills to your toolkit.
+</Callout>
+
+---
+
+## Course Structure
+
+**Each lesson includes:**
+- Clear learning objectives
+- Concept explanation with "why" before "how"
+- Step-by-step code examples
+- Common pitfalls and how to avoid them
+- Exercises to reinforce learning
+- Complete working code to reference
+
+**Each module includes:**
+- Capstone project tying concepts together
+- Best practices summary
+- Links to official documentation for deeper dives
+- Resources for continued learning
+
+## After This Course
+
+When you complete this course, you'll be able to:
+
+✅ **Build production APIs** from requirements to deployment
+✅ **Make architectural decisions** about structure, patterns, and tradeoffs
+✅ **Debug issues** quickly using proper logging and monitoring
+✅ **Write maintainable code** that other developers can understand
+✅ **Secure your APIs** against common vulnerabilities
+✅ **Scale your applications** as traffic grows
+✅ **Interview confidently** for roles requiring FastAPI expertise
+
+You'll have a portfolio piece (your complete API) to show employers and the skills to contribute to FastAPI projects on day one.
+
+## Let's Build Something Great
+
+APIs power everything from mobile apps to enterprise systems. FastAPI makes building them fast, but building them *right* takes knowledge and practice.
+
+This course gives you both.
+
+[Start your journey →](/docs/getting-started)

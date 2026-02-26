@@ -1,0 +1,831 @@
+---
+title: Request Examples
+description: Add examples to your API documentation to help users understand what data your endpoints expect.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { CopyFinalCode } from '@/components/copy-final-code';
+
+export const _fc = `from datetime import date
+from enum import Enum
+from typing import Annotated, List, Literal, Optional
+
+from fastapi import Body, FastAPI, Path, Query
+from pydantic import BaseModel, Field, model_validator
+
+app = FastAPI(title="Sports Matches API")
+
+
+class Sport(str, Enum):
+    football = "football"
+    cricket = "cricket"
+    hockey = "hockey"
+    basketball = "basketball"
+    baseball = "baseball"
+
+
+class Status(str, Enum):
+    upcoming = "upcoming"
+    cancelled = "cancelled"
+    abandoned = "abandoned"
+    completed = "completed"
+
+
+class Winner(str, Enum):
+    home_team = "home_team"
+    away_team = "away_team"
+    draw = "draw"
+
+
+class Player(BaseModel):
+    number: int = Field(ge=1, le=99, description="Jersey number", examples=[10])
+    name: str = Field(min_length=2, max_length=50, examples=["Lionel Messi"])
+    position: Literal["goalkeeper", "defender", "midfielder", "forward"] = Field(
+        examples=["forward"]
+    )
+    is_captain: bool = Field(default=False, examples=[True])
+
+
+class MatchEvent(BaseModel):
+    minute: int = Field(
+        ge=0, le=120, description="Minute when event occurred", examples=[45]
+    )
+    event_type: Literal["goal", "yellow_card", "red_card", "substitution"] = Field(
+        examples=["goal"]
+    )
+    team: Literal["home", "away"] = Field(examples=["home"])
+    player_name: str = Field(
+        min_length=2, max_length=50, examples=["Lionel Messi"]
+    )
+    description: Optional[str] = Field(
+        None, max_length=200, examples=["Right-footed shot from outside the box"]
+    )
+
+
+class TeamStats(BaseModel):
+    possession_percent: int = Field(ge=0, le=100, examples=[58])
+    shots: int = Field(ge=0, examples=[15])
+    shots_on_target: int = Field(ge=0, examples=[7])
+    corners: int = Field(ge=0, examples=[6])
+    fouls: int = Field(ge=0, examples=[12])
+
+    @model_validator(mode='after')
+    def validate_shots(self):
+        if self.shots_on_target > self.shots:
+            raise ValueError("shots_on_target cannot exceed total shots")
+        return self
+
+
+class MatchStatistics(BaseModel):
+    home_stats: TeamStats
+    away_stats: TeamStats
+    attendance: Optional[int] = Field(
+        None, ge=0, description="Number of spectators", examples=[60000]
+    )
+    referee: Optional[str] = Field(
+        None, min_length=2, max_length=50, examples=["Michael Oliver"]
+    )
+
+
+class Match(BaseModel):
+    id: int
+    home_team: str = Field(
+        min_length=2, max_length=50, examples=["Arsenal", "Real Madrid"]
+    )
+    away_team: str = Field(
+        min_length=2, max_length=50, examples=["Chelsea", "Barcelona"]
+    )
+    venue: Optional[str] = Field(
+        None,
+        min_length=3,
+        max_length=100,
+        examples=["Emirates Stadium", "Santiago Bernabeu"],
+    )
+    date: date = Field(examples=["2026-03-15"])
+    sport: Sport
+    status: Status
+    winner: Optional[Winner] = None
+    score_home: Optional[int] = Field(
+        None, ge=0, description="Home team score", examples=[3]
+    )
+    score_away: Optional[int] = Field(
+        None, ge=0, description="Away team score", examples=[1]
+    )
+    home_lineup: Optional[List[Player]] = None
+    away_lineup: Optional[List[Player]] = None
+    events: List[MatchEvent] = Field(default_factory=list)
+    statistics: Optional[MatchStatistics] = None
+
+
+class MatchFilters(BaseModel):
+    sport: Optional[Sport] = Field(
+        None, title="Sport Type", description="Filter matches by sport"
+    )
+    status: Optional[Status] = Field(
+        None, title="Match Status", description="Filter by match status"
+    )
+    winner: Optional[Winner] = None
+    team: Optional[str] = Field(
+        None,
+        min_length=3,
+        max_length=50,
+        description="Filter by team name (case-insensitive partial match)",
+        examples=["Arsenal"],
+    )
+
+
+class DateRangeFilters(BaseModel):
+    from_date: Optional[date] = Field(
+        None,
+        description="Matches on or after this date (YYYY-MM-DD)",
+        examples=["2026-01-01"],
+    )
+    to_date: Optional[date] = Field(
+        None,
+        description="Matches on or before this date (YYYY-MM-DD)",
+        examples=["2026-12-31"],
+    )
+
+    @model_validator(mode='after')
+    def validate_date_range(self):
+        if self.from_date and self.to_date:
+            if self.from_date > self.to_date:
+                raise ValueError("from_date must be before or equal to to_date")
+        return self
+
+
+class PaginationParams(BaseModel):
+    page: int = Field(1, ge=1, description="Page number (1-indexed)")
+    limit: int = Field(20, ge=1, le=100, description="Items per page (max 100)")
+
+
+INITIAL_DATA: List[Match] = [
+    Match(
+        id=1,
+        home_team="Arsenal",
+        away_team="Chelsea",
+        sport=Sport.football,
+        date=date(2025, 10, 21),
+        status=Status.completed,
+        winner=Winner.draw,
+        venue="Emirates Stadium",
+        score_home=2,
+        score_away=2,
+    ),
+    Match(
+        id=2,
+        home_team="Lakers",
+        away_team="Warriors",
+        sport=Sport.basketball,
+        date=date(2025, 11, 15),
+        status=Status.completed,
+        winner=Winner.home_team,
+        venue="Crypto.com Arena",
+        score_home=112,
+        score_away=98,
+    ),
+    Match(
+        id=3,
+        home_team="Real Madrid",
+        away_team="Barcelona",
+        sport=Sport.football,
+        date=date(2026, 4, 10),
+        status=Status.completed,
+        winner=Winner.draw,
+        venue="Santiago Bernabeu",
+        score_home=1,
+        score_away=1,
+    ),
+    Match(
+        id=4,
+        home_team="Knicks",
+        away_team="Celtics",
+        sport=Sport.basketball,
+        date=date(2026, 3, 5),
+        status=Status.upcoming,
+        winner=None,
+        venue="Madison Square Garden",
+    ),
+    Match(
+        id=5,
+        home_team="Yankees",
+        away_team="Red Sox",
+        sport=Sport.baseball,
+        date=date(2025, 8, 10),
+        status=Status.abandoned,
+        winner=None,
+        venue="Yankee Stadium",
+    ),
+    Match(
+        id=6,
+        home_team="India",
+        away_team="Pakistan",
+        sport=Sport.cricket,
+        date=date(2026, 3, 24),
+        status=Status.completed,
+        winner=Winner.home_team,
+        venue="Narendra Modi Stadium",
+        score_home=285,
+        score_away=240,
+    ),
+    Match(
+        id=7,
+        home_team="Lakers",
+        away_team="Warriors",
+        sport=Sport.basketball,
+        date=date(2025, 1, 15),
+        status=Status.completed,
+        winner=Winner.away_team,
+        venue="Crypto.com Arena",
+        score_home=95,
+        score_away=108,
+    ),
+]
+
+
+@app.get("/health", tags=["System"])
+def health_check():
+    return {"status": "ok"}
+
+
+@app.get("/matches", tags=["Matches"])
+def list_matches(
+    filters: Annotated[MatchFilters, Query()],
+    date_range: Annotated[DateRangeFilters, Query()],
+    pagination: Annotated[PaginationParams, Query()],
+):
+    matches = list(INITIAL_DATA)
+
+    if filters.sport:
+        matches = [m for m in matches if m.sport == filters.sport]
+    if filters.status:
+        matches = [m for m in matches if m.status == filters.status]
+    if filters.winner:
+        matches = [m for m in matches if m.winner == filters.winner]
+    if filters.team:
+        team_lower = filters.team.lower()
+        matches = [
+            m
+            for m in matches
+            if team_lower in m.home_team.lower() or team_lower in m.away_team.lower()
+        ]
+
+    if date_range.from_date:
+        matches = [m for m in matches if m.date >= date_range.from_date]
+    if date_range.to_date:
+        matches = [m for m in matches if m.date <= date_range.to_date]
+
+    total = len(matches)
+    start = (pagination.page - 1) * pagination.limit
+    paginated = matches[start : start + pagination.limit]
+
+    return {
+        "total": total,
+        "page": pagination.page,
+        "limit": pagination.limit,
+        "results": paginated,
+    }
+
+
+@app.get("/matches/{match_id}", tags=["Matches"])
+def get_match_by_id(
+    match_id: Annotated[
+        int,
+        Path(
+            ge=1,
+            title="Match ID",
+            description="The unique identifier of the match (must be positive)",
+        ),
+    ],
+):
+    for match in INITIAL_DATA:
+        if match.id == match_id:
+            return match
+    return {"error": "Match not found"}
+
+
+@app.post("/matches", tags=["Matches"])
+def create_match(
+    match: Annotated[
+        Match,
+        Body(
+            openapi_examples={
+                "basic": {
+                    "summary": "Basic upcoming match",
+                    "description": "Create a simple match with minimal required fields",
+                    "value": {
+                        "home_team": "Arsenal",
+                        "away_team": "Chelsea",
+                        "sport": "football",
+                        "date": "2026-03-15",
+                        "status": "upcoming",
+                        "venue": "Emirates Stadium",
+                    },
+                },
+                "completed": {
+                    "summary": "Completed match with scores",
+                    "description": "A finished match with final scores",
+                    "value": {
+                        "home_team": "Real Madrid",
+                        "away_team": "Barcelona",
+                        "sport": "football",
+                        "date": "2025-10-26",
+                        "status": "completed",
+                        "venue": "Santiago Bernabeu",
+                        "score_home": 2,
+                        "score_away": 1,
+                        "winner": "home_team",
+                    },
+                },
+                "with_lineup": {
+                    "summary": "Match with player lineup",
+                    "description": "Include starting lineups for both teams",
+                    "value": {
+                        "home_team": "Arsenal",
+                        "away_team": "Chelsea",
+                        "sport": "football",
+                        "date": "2026-03-15",
+                        "status": "upcoming",
+                        "venue": "Emirates Stadium",
+                        "home_lineup": [
+                            {
+                                "number": 1,
+                                "name": "Aaron Ramsdale",
+                                "position": "goalkeeper",
+                                "is_captain": False,
+                            },
+                            {
+                                "number": 10,
+                                "name": "Martin Odegaard",
+                                "position": "midfielder",
+                                "is_captain": True,
+                            },
+                        ],
+                        "away_lineup": [
+                            {
+                                "number": 1,
+                                "name": "Kepa Arrizabalaga",
+                                "position": "goalkeeper",
+                                "is_captain": False,
+                            }
+                        ],
+                    },
+                },
+            }
+        ),
+    ]
+):
+    """
+    Create a new match with optional detailed information.
+    
+    - Basic matches require only teams, sport, date, and status
+    - Completed matches should include scores and winner
+    - Optionally include lineups, events, and statistics
+    """
+    if match.status is Status.upcoming and match.date < date.today():
+        return {"error": "Upcoming match date cannot be in the past."}
+    if match.status is not Status.completed and match.winner is not None:
+        return {"error": "Status should be Completed to have a winner"}
+    if match.home_team == match.away_team:
+        return {"error": "Both teams cannot have the same name."}
+    if match.winner is None and match.status is Status.completed:
+        return {"error": "Winner cannot be None if match is completed"}
+    match.id = INITIAL_DATA[-1].id + 1
+    INITIAL_DATA.append(match)
+    return match
+`;
+
+# Request Examples
+
+Your API has great validation and clear error messages, but users still need to understand what data to send. In this lesson, we'll add examples to your API documentation that show users exactly what valid requests look like.
+
+---
+
+## The Problem: Unclear Expectations
+
+Visit `http://localhost:8000/docs` and click on `POST /matches`. The auto-generated schema shows field types and constraints:
+
+```json title="What the docs show now"
+{
+  "home_team": "string",
+  "away_team": "string",
+  "sport": "football",
+  "date": "2026-02-27",
+  "status": "upcoming"
+}
+```
+
+This is technically correct, but unhelpful:
+- What's a realistic team name?
+- What sports are actually available?
+- What combinations of fields make sense together?
+
+Users have to guess or experiment until they get it right.
+
+<Callout type="warn" title="Why Examples Matter">
+  Good API documentation doesn't just tell users what types are required — it shows them realistic, working examples they can copy and modify. This reduces support requests, speeds up integration, and creates a better developer experience.
+</Callout>
+
+---
+
+## Step 1 — Add Field-Level Examples
+
+The simplest way to add examples is directly in `Field()` definitions using the `examples` parameter:
+
+```diff title="matches.py"
+  class Match(BaseModel):
+      id: int
+-     home_team: str = Field(min_length=2, max_length=50)
++     home_team: str = Field(
++         min_length=2,
++         max_length=50,
++         examples=["Arsenal", "Real Madrid"],
++     )
+-     away_team: str = Field(min_length=2, max_length=50)
++     away_team: str = Field(
++         min_length=2,
++         max_length=50,
++         examples=["Chelsea", "Barcelona"],
++     )
+```
+
+The `examples` parameter takes a list of example values. When you open `/docs`, these examples appear in the schema and can be used to pre-fill the request body.
+
+<Callout type="info" title="Why a List?">
+  `examples` takes a list because you can provide multiple example values. FastAPI will typically show the first one, but some tools might cycle through them or show all of them. Providing 2-3 varied examples helps users understand the range of valid inputs.
+</Callout>
+
+Add examples to the remaining fields:
+
+```python title="matches.py"
+class Match(BaseModel):
+    id: int
+    home_team: str = Field(
+        min_length=2, max_length=50, examples=["Arsenal", "Real Madrid"]
+    )
+    away_team: str = Field(
+        min_length=2, max_length=50, examples=["Chelsea", "Barcelona"]
+    )
+    venue: Optional[str] = Field(
+        None,
+        min_length=3,
+        max_length=100,
+        examples=["Emirates Stadium", "Santiago Bernabeu"],
+    )
+    date: date = Field(examples=["2026-03-15"])
+    sport: Sport
+    status: Status
+    winner: Optional[Winner] = None
+    score_home: Optional[int] = Field(
+        None, ge=0, description="Home team score", examples=[3]
+    )
+    score_away: Optional[int] = Field(
+        None, ge=0, description="Away team score", examples=[1]
+    )
+```
+
+Now when users open the docs, they see realistic examples in every field. They can click "Try it out" and the request body is pre-filled with valid data.
+
+---
+
+## Step 2 — Add Examples to Nested Models
+
+Examples work the same way in nested models. Add them to `Player`:
+
+```diff title="matches.py"
+  class Player(BaseModel):
+-     number: int = Field(ge=1, le=99, description="Jersey number")
++     number: int = Field(ge=1, le=99, description="Jersey number", examples=[10])
+-     name: str = Field(min_length=2, max_length=50)
++     name: str = Field(min_length=2, max_length=50, examples=["Lionel Messi"])
+-     position: Literal["goalkeeper", "defender", "midfielder", "forward"]
++     position: Literal["goalkeeper", "defender", "midfielder", "forward"] = Field(
++         examples=["forward"]
++     )
+-     is_captain: bool = False
++     is_captain: bool = Field(default=False, examples=[True])
+```
+
+And to `MatchEvent`:
+
+```diff title="matches.py"
+  class MatchEvent(BaseModel):
+-     minute: int = Field(ge=0, le=120, description="Minute when event occurred")
++     minute: int = Field(
++         ge=0, le=120, description="Minute when event occurred", examples=[45]
++     )
+-     event_type: Literal["goal", "yellow_card", "red_card", "substitution"]
++     event_type: Literal["goal", "yellow_card", "red_card", "substitution"] = Field(
++         examples=["goal"]
++     )
+-     team: Literal["home", "away"]
++     team: Literal["home", "away"] = Field(examples=["home"])
+-     player_name: str = Field(min_length=2, max_length=50)
++     player_name: str = Field(
++         min_length=2, max_length=50, examples=["Lionel Messi"]
++     )
+-     description: Optional[str] = Field(None, max_length=200)
++     description: Optional[str] = Field(
++         None, max_length=200, examples=["Right-footed shot from outside the box"]
++     )
+```
+
+When nested models have examples, the auto-generated documentation shows complete, realistic nested structures.
+
+---
+
+## Step 3 — Add Endpoint-Level Examples with Body()
+
+Field-level examples are good for showing valid individual values, but they don't show how fields work together. For that, use endpoint-level examples with the `Body()` function.
+
+First, import `Body`:
+
+```diff title="matches.py"
+- from fastapi import FastAPI, Path, Query
++ from fastapi import Body, FastAPI, Path, Query
+```
+
+Then add `openapi_examples` to your POST endpoint:
+
+```python title="matches.py"
+@app.post("/matches", tags=["Matches"])
+def create_match(
+    match: Annotated[
+        Match,
+        Body(
+            openapi_examples={
+                "basic": {
+                    "summary": "Basic upcoming match",
+                    "description": "Create a simple match with minimal required fields",
+                    "value": {
+                        "home_team": "Arsenal",
+                        "away_team": "Chelsea",
+                        "sport": "football",
+                        "date": "2026-03-15",
+                        "status": "upcoming",
+                        "venue": "Emirates Stadium",
+                    },
+                },
+                "completed": {
+                    "summary": "Completed match with scores",
+                    "description": "A finished match with final scores",
+                    "value": {
+                        "home_team": "Real Madrid",
+                        "away_team": "Barcelona",
+                        "sport": "football",
+                        "date": "2025-10-26",
+                        "status": "completed",
+                        "venue": "Santiago Bernabeu",
+                        "score_home": 2,
+                        "score_away": 1,
+                        "winner": "home_team",
+                    },
+                },
+                "with_lineup": {
+                    "summary": "Match with player lineup",
+                    "description": "Include starting lineups for both teams",
+                    "value": {
+                        "home_team": "Arsenal",
+                        "away_team": "Chelsea",
+                        "sport": "football",
+                        "date": "2026-03-15",
+                        "status": "upcoming",
+                        "venue": "Emirates Stadium",
+                        "home_lineup": [
+                            {
+                                "number": 1,
+                                "name": "Aaron Ramsdale",
+                                "position": "goalkeeper",
+                                "is_captain": False,
+                            },
+                            {
+                                "number": 10,
+                                "name": "Martin Odegaard",
+                                "position": "midfielder",
+                                "is_captain": True,
+                            },
+                        ],
+                        "away_lineup": [
+                            {
+                                "number": 1,
+                                "name": "Kepa Arrizabalaga",
+                                "position": "goalkeeper",
+                                "is_captain": False,
+                            }
+                        ],
+                    },
+                },
+            }
+        ),
+    ]
+):
+    # ... same function body ...
+```
+
+Breaking down the structure:
+
+```python title="openapi_examples structure"
+Body(
+    openapi_examples={
+        "example_key": {                          # Unique identifier
+            "summary": "Short title",             # Shows in dropdown
+            "description": "Longer explanation", # Shows in example detail
+            "value": {                            # The actual example data
+                "field": "value",
+                # ... complete request body ...
+            },
+        },
+        "another_example": {
+            # ... another complete example ...
+        },
+    }
+)
+```
+
+Now when users visit `/docs` and click on `POST /matches`, they see a dropdown with three example scenarios:
+1. **Basic upcoming match** — minimal fields for a future match
+2. **Completed match with scores** — shows how to record results
+3. **Match with player lineup** — demonstrates nested structures
+
+Users can select any example and it fills the request body with that data. They can then modify it and send the request.
+
+<Callout type="info" title="Field Examples vs Endpoint Examples">
+  - **Field examples** (`examples` parameter in `Field()`) — show valid values for individual fields, used to generate default schema examples
+  - **Endpoint examples** (`openapi_examples` in `Body()`) — show complete realistic requests that demonstrate how fields work together
+  
+  Use both: field examples help users understand individual constraints, endpoint examples help them understand complete workflows.
+</Callout>
+
+---
+
+## Writing Good Examples
+
+Good examples are:
+
+**1. Realistic**
+```python
+# ✅ Good - realistic team names
+"home_team": "Arsenal"
+
+# ❌ Bad - placeholder values
+"home_team": "string"
+```
+
+**2. Demonstrate constraints**
+```python
+# ✅ Good - shows valid jersey number range
+"number": 10
+
+# ❌ Bad - doesn't show the constraint exists
+"number": 1
+```
+
+**3. Show relationships**
+```python
+# ✅ Good - winner matches the score
+{
+    "score_home": 3,
+    "score_away": 1,
+    "winner": "home_team",
+    "status": "completed"
+}
+
+# ❌ Bad - inconsistent state
+{
+    "score_home": 3,
+    "score_away": 1,
+    "winner": "away_team",  # Doesn't match score!
+    "status": "completed"
+}
+```
+
+**4. Cover common use cases**
+```python
+openapi_examples={
+    "basic": {...},       # Minimal required fields
+    "complete": {...},    # All optional fields included
+    "edge_case": {...},   # Unusual but valid scenario
+}
+```
+
+<Callout type="warn" title="Examples Are Part of Your API Contract">
+  Examples show users what your API expects. If your examples are wrong or inconsistent with validation rules, users will get confused and frustrated. Keep examples updated when you change validation rules.
+</Callout>
+
+---
+
+## Examples in Query Parameters
+
+Examples work in `Query()` too:
+
+```python title="matches.py"
+class MatchFilters(BaseModel):
+    sport: Optional[Sport] = Field(
+        None, title="Sport Type", description="Filter matches by sport"
+    )
+    status: Optional[Status] = Field(
+        None, title="Match Status", description="Filter by match status"
+    )
+    team: Optional[str] = Field(
+        None,
+        min_length=3,
+        max_length=50,
+        description="Filter by team name (case-insensitive partial match)",
+        examples=["Arsenal"],  # !mark
+    )
+
+
+class DateRangeFilters(BaseModel):
+    from_date: Optional[date] = Field(
+        None,
+        description="Matches on or after this date (YYYY-MM-DD)",
+        examples=["2026-01-01"],  # !mark
+    )
+    to_date: Optional[date] = Field(
+        None,
+        description="Matches on or before this date (YYYY-MM-DD)",
+        examples=["2026-12-31"],  # !mark
+    )
+```
+
+Now when users look at `GET /matches` in the docs, the query parameters show example values that they can use directly or modify.
+
+---
+
+## Where Examples Appear
+
+Examples you add show up in multiple places:
+
+**1. Interactive API docs** (`/docs`)
+- Pre-fill the "Try it out" form
+- Show in dropdown for `openapi_examples`
+- Display in schema section
+
+**2. OpenAPI JSON** (`/openapi.json`)
+- Part of the schema definition
+- Used by API client generators
+- Read by API testing tools
+
+**3. Alternative doc UIs** (`/redoc`)
+- Show in request body schema
+- Display alongside field descriptions
+
+**4. Client code generators**
+- Some tools use examples to generate default values
+- Help developers understand expected formats
+
+<Callout type="info" title="Examples Improve the Developer Experience">
+  Good examples reduce:
+  - Time to first successful API call
+  - Support questions about request format
+  - Trial and error during integration
+  - Documentation that just repeats the schema
+</Callout>
+
+---
+
+## What You've Learned
+
+```python title="Three ways to add examples"
+# 1. Field-level examples
+name: str = Field(examples=["Arsenal", "Chelsea"])
+
+# 2. Nested model examples
+player: Player  # Player fields have their own examples
+
+# 3. Endpoint-level examples
+def create_match(
+    match: Annotated[
+        Match,
+        Body(openapi_examples={"basic": {...}, "complete": {...}})
+    ]
+):
+```
+
+All three work together to create comprehensive documentation:
+- Field examples show valid individual values
+- Nested model examples propagate through the structure
+- Endpoint examples show complete realistic requests
+
+---
+
+## What's Next
+
+Your API now has:
+- ✅ Complete input validation at every level
+- ✅ Clear error messages with exact problem locations
+- ✅ Nested models for complex data structures
+- ✅ Comprehensive examples in the documentation
+
+You've built a solid foundation. In a production API, you'd add:
+- Database persistence (currently using an in-memory list)
+- Authentication and authorization
+- Response models (controlling what data is returned)
+- Error handling and custom error responses
+- Rate limiting
+- Caching
+- Deployment configuration
+
+But the validation patterns you've learned — `Query`, `Path`, `Field`, model validators, and nested models — remain the same. These are the building blocks of any well-designed FastAPI application.
+
+<CopyFinalCode code={_fc} />

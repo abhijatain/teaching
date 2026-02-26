@@ -1,0 +1,633 @@
+---
+title: Query Parameter Validation
+description: Add validation and constraints to the pagination, sorting, and filter parameters we built in the last lesson.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { CopyFinalCode } from '@/components/copy-final-code';
+
+export const _fc = `from datetime import date
+from enum import Enum
+from typing import Annotated, List, Literal, Optional
+
+from fastapi import FastAPI, Query
+from pydantic import BaseModel
+
+app = FastAPI(title="Sports Matches API")
+
+
+class Sport(str, Enum):
+    football = "football"
+    cricket = "cricket"
+    hockey = "hockey"
+    basketball = "basketball"
+    baseball = "baseball"
+
+
+class Status(str, Enum):
+    upcoming = "upcoming"
+    cancelled = "cancelled"
+    abandoned = "abandoned"
+    completed = "completed"
+
+
+class Winner(str, Enum):
+    home_team = "home_team"
+    away_team = "away_team"
+    draw = "draw"
+
+
+class TeamFilter(str, Enum):
+    won = "won"
+    lost = "lost"
+    draw = "draw"
+
+
+class Match(BaseModel):
+    id: int
+    home_team: str
+    away_team: str
+    venue: Optional[str] = None
+    date: date
+    sport: Sport
+    status: Status
+    winner: Optional[Winner] = None
+
+
+INITIAL_DATA: List[Match] = [
+    Match(id=1, home_team="Arsenal", away_team="Chelsea", sport=Sport.football,
+          date=date(2025, 10, 21), status=Status.completed, winner=Winner.draw,
+          venue="Emirates Stadium"),
+    Match(id=2, home_team="Lakers", away_team="Warriors", sport=Sport.basketball,
+          date=date(2025, 11, 15), status=Status.completed, winner=Winner.home_team,
+          venue="Crypto.com Arena"),
+    Match(id=3, home_team="Real Madrid", away_team="Barcelona", sport=Sport.football,
+          date=date(2026, 4, 10), status=Status.completed, winner=Winner.draw,
+          venue="Santiago Bernabeu"),
+    Match(id=4, home_team="Knicks", away_team="Celtics", sport=Sport.basketball,
+          date=date(2026, 3, 5), status=Status.upcoming, winner=None,
+          venue="Madison Square Garden"),
+    Match(id=5, home_team="Yankees", away_team="Red Sox", sport=Sport.baseball,
+          date=date(2025, 8, 10), status=Status.abandoned, winner=None,
+          venue="Yankee Stadium"),
+    Match(id=6, home_team="India", away_team="Pakistan", sport=Sport.cricket,
+          date=date(2026, 3, 24), status=Status.completed, winner=Winner.home_team,
+          venue="Narendra Modi Stadium"),
+    Match(id=7, home_team="Lakers", away_team="Warriors", sport=Sport.basketball,
+          date=date(2025, 1, 15), status=Status.completed, winner=Winner.away_team,
+          venue="Crypto.com Arena"),
+]
+
+
+@app.get("/health", tags=["System"])
+def health_check():
+    return {"status": "ok"}
+
+
+@app.get("/matches", tags=["Matches"])
+def list_matches(
+    sport: Annotated[
+        Optional[Sport],
+        Query(title="Sport Type", description="Filter matches by sport"),
+    ] = None,
+    status: Annotated[
+        Optional[Status],
+        Query(title="Match Status", description="Filter by match status"),
+    ] = None,
+    winner: Annotated[Optional[Winner], Query()] = None,
+    team_name: Annotated[
+        Optional[str],
+        Query(min_length=3, max_length=50, title="Team Name",
+              description="Filter by team name. Case-insensitive partial match."),
+    ] = None,
+    team_filter: Annotated[Optional[TeamFilter], Query()] = None,
+    from_date: Annotated[
+        Optional[date],
+        Query(alias="from-date", title="Start Date",
+              description="Filter matches on or after this date (YYYY-MM-DD)"),
+    ] = None,
+    to_date: Annotated[
+        Optional[date],
+        Query(alias="to-date", title="End Date",
+              description="Filter matches on or before this date (YYYY-MM-DD)"),
+    ] = None,
+    page: Annotated[int, Query(ge=1, description="Page number (1-indexed)")] = 1,
+    limit: Annotated[int, Query(ge=1, le=100, description="Items per page")] = 20,
+    sort_by: Annotated[
+        Optional[Literal["date", "sport", "status", "home_team"]],
+        Query(description="Field to sort by"),
+    ] = None,
+    sort_order: Annotated[Literal["asc", "desc"], Query(description="Sort order")] = "asc",
+):
+    if from_date and to_date and from_date > to_date:
+        return {"error": "from-date must be before to-date"}
+
+    matches = list(INITIAL_DATA)
+
+    if status:
+        matches = [m for m in matches if m.status == status]
+    if sport:
+        matches = [m for m in matches if m.sport == sport]
+    if winner:
+        matches = [m for m in matches if m.winner == winner]
+    if from_date:
+        matches = [m for m in matches if m.date >= from_date]
+    if to_date:
+        matches = [m for m in matches if m.date <= to_date]
+
+    if team_name:
+        team = team_name.lower()
+        if team_filter is None:
+            matches = [m for m in matches if team in m.home_team.lower() or team in m.away_team.lower()]
+        elif team_filter == TeamFilter.won:
+            matches = [m for m in matches if
+                       (team == m.home_team.lower() and m.winner == Winner.home_team) or
+                       (team == m.away_team.lower() and m.winner == Winner.away_team)]
+        elif team_filter == TeamFilter.lost:
+            matches = [m for m in matches if
+                       (team == m.home_team.lower() and m.winner == Winner.away_team) or
+                       (team == m.away_team.lower() and m.winner == Winner.home_team)]
+        elif team_filter == TeamFilter.draw:
+            matches = [m for m in matches if
+                       (team in m.home_team.lower() or team in m.away_team.lower()) and
+                       m.winner == Winner.draw]
+
+    if sort_by:
+        matches = sorted(matches, key=lambda m: getattr(m, sort_by),
+                         reverse=(sort_order == "desc"))
+
+    total = len(matches)
+    total_pages = (total + limit - 1) // limit if total > 0 else 0
+
+    if page > total_pages and total > 0:
+        return {"error": f"Page {page} does not exist. Total pages: {total_pages}",
+                "total": total, "total_pages": total_pages}
+
+    start = (page - 1) * limit
+    paginated = matches[start:start + limit]
+
+    if not paginated:
+        return {"message": "No matches found.", "total": 0, "page": page,
+                "limit": limit, "total_pages": 0, "results": []}
+
+    return {"total": total, "page": page, "limit": limit,
+            "total_pages": total_pages, "results": paginated}
+
+
+@app.get("/matches/{match_id}", tags=["Matches"])
+def get_match_by_id(match_id: int):
+    for match in INITIAL_DATA:
+        if match.id == match_id:
+            return match
+    return {"error": "Match not found"}
+
+
+@app.post("/matches", tags=["Matches"])
+def create_match(match: Match):
+    if match.status is Status.upcoming and match.date < date.today():
+        return {"error": "Upcoming match date cannot be in the past."}
+    if match.status is not Status.completed and match.winner is not None:
+        return {"error": "Status should be Completed to have a winner"}
+    if match.home_team == match.away_team:
+        return {"error": "Both teams cannot have the same name."}
+    if match.winner is None and match.status is Status.completed:
+        return {"error": "Winner cannot be None if match is completed"}
+    match.id = INITIAL_DATA[-1].id + 1
+    INITIAL_DATA.append(match)
+    return match
+`;
+
+# Query Parameter Validation
+
+In the last lesson, we added pagination, sorting, and a date range filter to our `/matches` endpoint. Our function signature now looks like this:
+
+```python title="matches.py - where we left off"
+def list_matches(
+    status: Optional[Status] = None,
+    sport: Optional[Sport] = None,
+    winner: Optional[Winner] = None,
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+    team_name: Optional[str] = None,
+    team_filter: Optional[TeamFilter] = None,
+    page: int = 1,
+    limit: int = 10,
+    sort_by: Optional[SortBy] = None,
+    sort_order: SortOrder = SortOrder.asc,
+):
+```
+
+This works well, but there's a gap: **none of these parameters have any constraints**. FastAPI accepts whatever values the user sends, and it's entirely up to our code to deal with the consequences.
+
+Let's look at what that means in practice.
+
+---
+
+## The Problem: No Constraints
+
+Try sending these requests to our current endpoint:
+
+```bash title="All of these succeed — but should they?"
+/matches?team_name=a             # A single letter — will match almost everything
+/matches?team_name=              # Empty string — wastes time filtering on nothing
+/matches?page=0                  # Page 0 doesn't exist (we count from 1)
+/matches?page=-5                 # Negative page makes no sense
+/matches?limit=99999             # Returns everything — kills pagination entirely
+```
+
+Each of these passes right into our function without complaint. Our pagination math handles `page=0` by returning an empty result, but it doesn't tell the user *why*. A user who accidentally sends `limit=99999` defeats the entire point of pagination we built in the last lesson.
+
+<Callout type="warn" title="No Constraints = Silent Failures">
+  Without validation, bad inputs either silently return wrong results or cause confusing errors. The user has no idea what values are acceptable, and we have no protection against accidental or intentional abuse.
+</Callout>
+
+The solution is FastAPI's `Query` class — a tool that lets us attach constraints and documentation directly to each parameter, without writing any manual checks ourselves.
+
+---
+
+## Step 1 — Import Query and Annotated
+
+We need two new imports:
+
+```diff title="matches.py"
+  from datetime import date
+  from enum import Enum
+- from typing import List, Optional
++ from typing import Annotated, List, Optional
+
+- from fastapi import FastAPI
++ from fastapi import FastAPI, Query
+  from pydantic import BaseModel
+```
+
+`Query` is the FastAPI class that holds our validation rules. `Annotated` is a standard Python type that lets us attach those rules to a parameter's type declaration. Think of `Annotated` as a way of writing: "this is an `Optional[str]`, and here are the extra rules that apply to it."
+
+---
+
+## Step 2 — Validate the Pagination Parameters
+
+Let's start with `page` and `limit`, since we just built those and the problem is fresh.
+
+### The current problem
+
+Right now, nothing stops a user from sending `page=0` or `limit=99999`. Our code will either silently return an empty page or load every record in the database.
+
+### Adding constraints
+
+Replace the plain `page: int = 1` and `limit: int = 10` with validated versions:
+
+```diff title="matches.py"
+def list_matches(
+    # ... filters ...
+-   page: int = 1,
+-   limit: int = 10,
++   page: Annotated[int, Query(ge=1, description="Page number, starting from 1")] = 1,
++   limit: Annotated[int, Query(ge=1, le=100, description="Number of results per page")] = 20,
+    # ... sorting ...
+):
+```
+
+### Understanding the syntax
+
+```python title="Breaking down the annotation"
+page: Annotated[int, Query(ge=1, description="Page number, starting from 1")] = 1
+      ^^^^^^^^^
+      Annotated wraps the type
+
+      Annotated[int, Query(ge=1, ...)] = 1
+                ^^^
+                The actual type — a plain integer
+
+      Annotated[int, Query(ge=1, ...)] = 1
+                     ^^^^^^^^^^^^^^^^
+                     Validation rules from FastAPI's Query class
+
+      Annotated[int, Query(ge=1, ...)] = 1
+                                          ^
+                                          Default value — still works exactly as before
+```
+
+`ge=1` means "greater than or equal to 1". So `page=0` and `page=-5` will both be rejected before our function even runs.
+
+`le=100` on `limit` means "less than or equal to 100". This caps the page size, so users can't request 10,000 results at once.
+
+### What happens now
+
+Try sending an invalid page:
+
+```bash
+/matches?page=0
+```
+
+Response — returned automatically by FastAPI, before our code runs:
+
+```json title="Automatic validation error"
+{
+  "detail": [
+    {
+      "loc": ["query", "page"],
+      "msg": "ensure this value is greater than or equal to 1",
+      "type": "value_error.number.not_ge",
+      "ctx": {"limit_value": 1}
+    }
+  ]
+}
+```
+
+The user immediately knows what they did wrong and what the valid range is. We didn't write a single `if` statement.
+
+<Callout type="info" title="Automatic Validation">
+  FastAPI **intercepts** the request before your function runs. Invalid parameters are rejected immediately with a clear error message. Your function code never sees the bad input.
+</Callout>
+
+---
+
+## Step 3 — Validate the team_name Parameter
+
+Our `team_name` filter accepts any string. A single letter like `"a"` will match almost every team name, and an empty string will waste time filtering on nothing useful.
+
+### Adding length constraints
+
+```diff title="matches.py"
+- team_name: Optional[str] = None,
++ team_name: Annotated[
++     Optional[str],
++     Query(
++         min_length=3,
++         max_length=50,
++         title="Team Name",
++         description="Filter by team name. Case-insensitive partial match.",
++     ),
++ ] = None,
+```
+
+`min_length=3` prevents single-letter searches. `max_length=50` prevents absurdly long inputs. The `title` and `description` fields aren't validation rules — they're documentation that shows up in the auto-generated API docs at `/docs`.
+
+Try sending a too-short search:
+
+```bash
+/matches?team_name=AB
+```
+
+Response:
+
+```json title="Validation error"
+{
+  "detail": [
+    {
+      "loc": ["query", "team_name"],
+      "msg": "ensure this value has at least 3 characters",
+      "type": "value_error.any_str.min_length",
+      "ctx": {"limit_value": 3}
+    }
+  ]
+}
+```
+
+<Callout type="info" title="Why 3 Characters?">
+  Most real team names are at least 3 characters. This is a reasonable floor that prevents trivial inputs without blocking legitimate short names. Choose your limits based on your actual data — if you have a team named "FC", you'd lower this to 2.
+</Callout>
+
+---
+
+## Step 4 — Use Aliases for the Date Parameters
+
+We named our date parameters `start_date` and `end_date`. In URLs, the convention is often to use hyphens (`from-date`, `to-date`) rather than underscores. But hyphens aren't valid in Python variable names, so we can't name our parameters that way directly.
+
+The `alias` option solves this — it lets the URL use one name while the Python variable uses another:
+
+```diff title="matches.py"
+- start_date: Optional[date] = None,
+- end_date: Optional[date] = None,
++ from_date: Annotated[
++     Optional[date],
++     Query(
++         alias="from-date",
++         title="Start Date",
++         description="Filter matches on or after this date (YYYY-MM-DD)",
++     ),
++ ] = None,
++ to_date: Annotated[
++     Optional[date],
++     Query(
++         alias="to-date",
++         title="End Date",
++         description="Filter matches on or before this date (YYYY-MM-DD)",
++     ),
++ ] = None,
+```
+
+Users now send requests like:
+
+```bash
+/matches?from-date=2025-01-01&to-date=2025-12-31
+```
+
+Inside your function, you access these as `from_date` and `to_date` — valid Python names. Also update the manual date range check we wrote in the last lesson to use the new variable names:
+
+```diff title="matches.py"
+- if start_date and end_date and start_date > end_date:
+-     return {"Error": "start_date must be before or equal to end_date."}
++ if from_date and to_date and from_date > to_date:
++     return {"error": "from-date must be before to-date"}
+```
+
+And update the filtering logic below it:
+
+```diff title="matches.py"
+- if start_date:
+-     matches = [m for m in matches if m.date >= start_date]
+- if end_date:
+-     matches = [m for m in matches if m.date <= end_date]
++ if from_date:
++     matches = [m for m in matches if m.date >= from_date]
++ if to_date:
++     matches = [m for m in matches if m.date <= to_date]
+```
+
+---
+
+## Step 5 — Add Descriptions to the Other Parameters
+
+Even parameters that don't need length constraints benefit from documentation. Let's add `title` and `description` to the enum filters, and also update the sorting parameters while we're here.
+
+### Enum filters
+
+```diff title="matches.py"
+- sport: Optional[Sport] = None,
++ sport: Annotated[
++     Optional[Sport],
++     Query(title="Sport Type", description="Filter matches by sport"),
++ ] = None,
+- status: Optional[Status] = None,
++ status: Annotated[
++     Optional[Status],
++     Query(title="Match Status", description="Filter by match status"),
++ ] = None,
+- winner: Optional[Winner] = None,
++ winner: Annotated[Optional[Winner], Query()] = None,
+```
+
+### Sorting parameters — and a new way to write them
+
+For `sort_by` and `sort_order`, we're going to make one extra change alongside adding descriptions. Instead of the `SortBy` and `SortOrder` enum classes we defined last lesson, we'll replace them with `Literal` — a built-in Python type that pins a variable to a fixed set of allowed string values:
+
+```diff title="matches.py"
+- sort_by: Optional[SortBy] = None,
++ sort_by: Annotated[
++     Optional[Literal["date", "sport", "status", "home_team"]],
++     Query(description="Field to sort results by"),
++ ] = None,
+- sort_order: SortOrder = SortOrder.asc,
++ sort_order: Annotated[
++     Literal["asc", "desc"],
++     Query(description="Sort direction — asc (default) or desc"),
++ ] = "asc",
+```
+
+Since we no longer reference `SortBy` or `SortOrder` anywhere, remove those enum classes too:
+
+```diff title="matches.py"
+- class SortBy(str, Enum):
+-     date = "date"
+-     sport = "sport"
+-     status = "status"
+-     home_team = "home_team"
+
+- class SortOrder(str, Enum):
+-     asc = "asc"
+-     desc = "desc"
+```
+
+And add `Literal` to the imports at the top:
+
+```diff title="matches.py"
+- from typing import Annotated, List, Optional
++ from typing import Annotated, List, Literal, Optional
+```
+
+<Callout type="info" title="Literal vs Enum — what's the difference?">
+  Both do the same job here: FastAPI rejects any value that isn't in the allowed list. The practical difference is just where the allowed values live.
+
+  With an **Enum**, the values are defined once as a class and can be reused across multiple parameters or files. With **`Literal`**, the values are written inline, right next to the parameter. For sorting options that are only used in one place, `Literal` is shorter and easier to read at a glance — there's no need to scroll up to a class definition to know what values are allowed.
+</Callout>
+
+Visit `http://localhost:8000/docs` after making these changes. Every parameter now has a title, description, and visible constraints. The enum parameters (`sport`, `status`, `winner`) show dropdown menus with all valid choices. Users can explore your API without reading any external documentation.
+
+<Callout type="info" title="Self-Documenting APIs">
+  The `title` and `description` you write here appear in the interactive docs, in the OpenAPI schema at `/openapi.json`, and in any client libraries auto-generated from your API. Write them as if explaining to a developer who has never seen your API before.
+</Callout>
+
+---
+
+## What Query Can't Validate
+
+`Query` handles individual parameter rules — type, length, numeric bounds, format. But it can't validate **relationships between parameters**.
+
+For example:
+
+```bash title="Logically invalid, but passes individual validation"
+/matches?from-date=2025-12-31&to-date=2025-01-01
+```
+
+Both dates are valid individually, but the range is inverted — the start is *after* the end. FastAPI has no way to know this is wrong from the `Query` rules alone.
+
+That's why we still need the manual check we wrote in the last lesson:
+
+```python title="matches.py"
+if from_date and to_date and from_date > to_date:
+    return {"error": "from-date must be before to-date"}
+```
+
+<Callout type="warn" title="Two Layers of Validation">
+  Think of it as two separate jobs:
+
+  - **FastAPI/Pydantic via `Query`:** Validates each parameter individually — correct type, correct format, within allowed length or range
+  - **Your code:** Validates logical relationships between parameters — date range ordering, conflicting filter combinations
+
+  You need both layers for a robust API.
+</Callout>
+
+---
+
+## The Complete Updated Signature
+
+Here's the full `list_matches` function signature with all validation applied:
+
+```python title="matches.py"
+@app.get("/matches", tags=["Matches"])
+def list_matches(
+    sport: Annotated[
+        Optional[Sport],
+        Query(title="Sport Type", description="Filter matches by sport"),
+    ] = None,
+    status: Annotated[
+        Optional[Status],
+        Query(title="Match Status", description="Filter by match status"),
+    ] = None,
+    winner: Annotated[Optional[Winner], Query()] = None,
+    team_name: Annotated[
+        Optional[str],
+        Query(
+            min_length=3,
+            max_length=50,
+            title="Team Name",
+            description="Filter by team name. Case-insensitive partial match.",
+        ),
+    ] = None,
+    team_filter: Annotated[Optional[TeamFilter], Query()] = None,
+    from_date: Annotated[
+        Optional[date],
+        Query(alias="from-date", title="Start Date",
+              description="Filter matches on or after this date (YYYY-MM-DD)"),
+    ] = None,
+    to_date: Annotated[
+        Optional[date],
+        Query(alias="to-date", title="End Date",
+              description="Filter matches on or before this date (YYYY-MM-DD)"),
+    ] = None,
+    page: Annotated[int, Query(ge=1, description="Page number, starting from 1")] = 1,
+    limit: Annotated[int, Query(ge=1, le=100, description="Number of results per page")] = 20,
+    sort_by: Annotated[
+        Optional[Literal["date", "sport", "status", "home_team"]],  # replaces SortBy enum
+        Query(description="Field to sort results by"),
+    ] = None,
+    sort_order: Annotated[
+        Literal["asc", "desc"],  # replaces SortOrder enum
+        Query(description="Sort direction — asc (default) or desc"),
+    ] = "asc",
+):
+```
+
+The filtering, sorting, and pagination logic inside the function stays exactly the same as it was at the end of the last lesson. We only changed the parameter declarations.
+
+---
+
+## What Validation We Now Get for Free
+
+Here's a summary of everything FastAPI now enforces automatically before our function runs:
+
+| Parameter | Validation | Error if... |
+|-----------|-----------|-------------|
+| `sport` | Must be a valid enum value | User sends `sport=soccer` |
+| `status` | Must be a valid enum value | User sends `status=finished` |
+| `winner` | Must be a valid enum value | User sends `winner=nobody` |
+| `team_name` | 3–50 characters | User sends `team_name=AB` or an empty string |
+| `from-date` | Valid `YYYY-MM-DD` date | User sends `from-date=tomorrow` |
+| `to-date` | Valid `YYYY-MM-DD` date | User sends `to-date=2025-13-45` |
+| `page` | Integer ≥ 1 | User sends `page=0` or `page=-1` |
+| `limit` | Integer between 1 and 100 | User sends `limit=0` or `limit=99999` |
+| `sort_by` | One of the allowed field names | User sends `sort_by=score` |
+| `sort_order` | `"asc"` or `"desc"` | User sends `sort_order=ascending` |
+
+<Callout type="info" title="Zero Defensive Code Inside the Function">
+  Notice we didn't add any `if len(team_name) < 3` checks or `if page < 1` guards inside our filtering logic. We don't need to — FastAPI guarantees the data is valid before our function runs. This keeps the business logic clean and focused on what it's actually supposed to do.
+</Callout>
+
+---
+
+## What's Next
+
+We've now built a complete GET endpoint: filters, date ranges, sorting, pagination, and validation. In the next lesson, we'll step back and look at how to apply similar validation to path parameters (like the `match_id` in `/matches/{match_id}`) and what to do when you need custom validation rules that go beyond what `Query` can express.
+
+<CopyFinalCode code={_fc} />

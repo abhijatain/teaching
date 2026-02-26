@@ -1,0 +1,807 @@
+---
+title: Refactoring
+description: Group the growing list of query parameters into reusable Pydantic models and move all cross-parameter validation inside them.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { CopyFinalCode } from '@/components/copy-final-code';
+
+export const _fc = `from datetime import date
+from enum import Enum
+from typing import Annotated, List, Literal, Optional
+
+from fastapi import FastAPI, Path, Query
+from pydantic import BaseModel, Field, computed_field, field_validator, model_validator
+
+app = FastAPI(title="Sports Matches API")
+
+
+class Sport(str, Enum):
+    football = "football"
+    cricket = "cricket"
+    hockey = "hockey"
+    basketball = "basketball"
+    baseball = "baseball"
+
+
+class Status(str, Enum):
+    upcoming = "upcoming"
+    cancelled = "cancelled"
+    abandoned = "abandoned"
+    completed = "completed"
+
+
+class Winner(str, Enum):
+    home_team = "home_team"
+    away_team = "away_team"
+    draw = "draw"
+
+
+class TeamFilter(str, Enum):
+    won = "won"
+    lost = "lost"
+    draw = "draw"
+
+
+class Match(BaseModel):
+    id: int
+    home_team: str
+    away_team: str
+    venue: Optional[str] = None
+    date: date
+    sport: Sport
+    status: Status
+    winner: Optional[Winner] = None
+
+    @field_validator('home_team', 'away_team')
+    @classmethod
+    def normalize_team_name(cls, value):
+        return value.strip().lower()
+
+    @field_validator('venue')
+    @classmethod
+    def normalize_venue(cls, value):
+        if value is not None:
+            return value.strip().lower()
+        return value
+
+
+class MatchFilters(BaseModel):
+    sport: Optional[Sport] = Field(
+        None,
+        title="Sport Type",
+        description="Filter matches by sport",
+    )
+    status: Optional[Status] = Field(
+        None,
+        title="Match Status",
+        description="Filter by match status",
+    )
+    winner: Optional[Winner] = Field(
+        None,
+        title="Winner",
+        description="Filter by match winner",
+    )
+    team: Optional[str] = Field(
+        None,
+        min_length=3,
+        max_length=50,
+        pattern="^[A-Za-z0-9 ]+$",
+        title="Team Name",
+        description="Filter by team name. Case-insensitive partial match. Letters, numbers and spaces only.",
+    )
+    team_filter: Optional[TeamFilter] = Field(
+        None,
+        title="Team Result Filter",
+        description="Filter by how the team performed — won, lost, or draw. Requires team to be set.",
+    )
+
+    @model_validator(mode='after')
+    def validate_winner_and_team_filter(self):
+        if self.team_filter and self.winner:
+            raise ValueError("team_filter and winner cannot be used together")
+        if (self.team_filter or self.winner) and self.status not in (Status.completed, None):
+            raise ValueError("team_filter and winner can only be used when status is 'completed'")
+        return self
+
+    @field_validator('team')
+    @classmethod
+    def normalize_team(cls, value):
+        if value is not None:
+            return value.strip().lower()
+        return value
+
+
+class DateRangeFilters(BaseModel):
+    from_date: Optional[date] = Field(
+        None,
+        title="Start Date",
+        description="Filter matches on or after this date (YYYY-MM-DD)",
+    )
+    to_date: Optional[date] = Field(
+        None,
+        title="End Date",
+        description="Filter matches on or before this date (YYYY-MM-DD)",
+    )
+
+    @model_validator(mode='after')
+    def validate_date_range(self):
+        if self.from_date and self.to_date:
+            if self.from_date > self.to_date:
+                raise ValueError("from_date must be before or equal to to_date")
+        return self
+
+
+class PaginationParams(BaseModel):
+    page: int = Field(1, ge=1, description="Page number (1-indexed)")
+    limit: int = Field(20, ge=1, le=100, description="Items per page (max 100)")
+
+    @computed_field
+    @property
+    def offset(self) -> int:
+        return (self.page - 1) * self.limit
+
+
+INITIAL_DATA: List[Match] = [
+    Match(id=1, home_team="Arsenal", away_team="Chelsea", sport=Sport.football,
+          date=date(2025, 10, 21), status=Status.completed, winner=Winner.draw,
+          venue="Emirates Stadium"),
+    Match(id=2, home_team="Lakers", away_team="Warriors", sport=Sport.basketball,
+          date=date(2025, 11, 15), status=Status.completed, winner=Winner.home_team,
+          venue="Crypto.com Arena"),
+    Match(id=3, home_team="Real Madrid", away_team="Barcelona", sport=Sport.football,
+          date=date(2026, 4, 10), status=Status.completed, winner=Winner.draw,
+          venue="Santiago Bernabeu"),
+    Match(id=4, home_team="Knicks", away_team="Celtics", sport=Sport.basketball,
+          date=date(2026, 3, 5), status=Status.upcoming, winner=None,
+          venue="Madison Square Garden"),
+    Match(id=5, home_team="Yankees", away_team="Red Sox", sport=Sport.baseball,
+          date=date(2025, 8, 10), status=Status.abandoned, winner=None,
+          venue="Yankee Stadium"),
+    Match(id=6, home_team="India", away_team="Pakistan", sport=Sport.cricket,
+          date=date(2026, 3, 24), status=Status.completed, winner=Winner.home_team,
+          venue="Narendra Modi Stadium"),
+    Match(id=7, home_team="Lakers", away_team="Warriors", sport=Sport.basketball,
+          date=date(2025, 1, 15), status=Status.completed, winner=Winner.away_team,
+          venue="Crypto.com Arena"),
+]
+
+
+class SortParams(BaseModel):
+    sort_by: Optional[Literal["date", "sport", "status"]] = Field(
+        None,
+        title="Sort By",
+        description="Field to sort results by",
+    )
+    sort_order: Literal["asc", "desc"] = Field(
+        "asc",
+        title="Sort Order",
+        description="Sort direction — asc for ascending, desc for descending",
+    )
+
+
+@app.get("/health", tags=["System"])
+def health_check():
+    return {"status": "ok"}
+
+
+@app.get("/matches", tags=["Matches"])
+def list_matches(
+    filters: Annotated[MatchFilters, Query()],
+    date_range: Annotated[DateRangeFilters, Query()],
+    pagination: Annotated[PaginationParams, Query()],
+    sorting: Annotated[SortParams, Query()],
+):
+    matches = list(INITIAL_DATA)
+
+    if filters.sport:
+        matches = [m for m in matches if m.sport == filters.sport]
+    if filters.status:
+        matches = [m for m in matches if m.status == filters.status]
+    if filters.winner:
+        matches = [m for m in matches if m.winner == filters.winner]
+
+    if filters.team:
+        team = filters.team
+        if filters.team_filter is None:
+            matches = [m for m in matches if team in m.home_team or team in m.away_team]
+        elif filters.team_filter == TeamFilter.won:
+            matches = [m for m in matches if
+                       (team == m.home_team and m.winner == Winner.home_team) or
+                       (team == m.away_team and m.winner == Winner.away_team)]
+        elif filters.team_filter == TeamFilter.lost:
+            matches = [m for m in matches if
+                       (team == m.home_team and m.winner == Winner.away_team) or
+                       (team == m.away_team and m.winner == Winner.home_team)]
+        elif filters.team_filter == TeamFilter.draw:
+            matches = [m for m in matches if
+                       (team in m.home_team or team in m.away_team) and
+                       m.winner == Winner.draw]
+
+    if date_range.from_date:
+        matches = [m for m in matches if m.date >= date_range.from_date]
+    if date_range.to_date:
+        matches = [m for m in matches if m.date <= date_range.to_date]
+
+    if sorting.sort_by:
+        reverse = sorting.sort_order == "desc"
+        matches = sorted(matches, key=lambda m: getattr(m, sorting.sort_by), reverse=reverse)
+
+    total = len(matches)
+    paginated = matches[pagination.offset:pagination.offset + pagination.limit]
+
+    return {"total": total, "page": pagination.page,
+            "limit": pagination.limit, "results": paginated}
+
+
+@app.get("/matches/{match_id}", tags=["Matches"])
+def get_match_by_id(
+    match_id: Annotated[
+        int,
+        Path(ge=1, title="Match ID",
+             description="The unique identifier of the match (must be positive)"),
+    ],
+):
+    for match in INITIAL_DATA:
+        if match.id == match_id:
+            return match
+    return {"error": "Match not found"}
+
+
+@app.post("/matches", tags=["Matches"])
+def create_match(match: Match):
+    if match.status is Status.upcoming and match.date < date.today():
+        return {"error": "Upcoming match date cannot be in the past."}
+    if match.status is not Status.completed and match.winner is not None:
+        return {"error": "Status should be Completed to have a winner"}
+    if match.home_team == match.away_team:
+        return {"error": "Both teams cannot have the same name."}
+    if match.winner is None and match.status is Status.completed:
+        return {"error": "Winner cannot be None if match is completed"}
+    match.id = INITIAL_DATA[-1].id + 1
+    INITIAL_DATA.append(match)
+    return match
+`;
+
+# Query Parameter Models
+
+At the end of the last two lessons, our `list_matches` function has eleven parameters and three manual validation checks scattered through the function body:
+
+```python title="matches.py - where we left off"
+def list_matches(
+    sport: Annotated[Optional[Sport], Query(...)] = None,
+    status: Annotated[Optional[Status], Query(...)] = None,
+    winner: Annotated[Optional[Winner], Query()] = None,
+    team_name: Annotated[Optional[str], Query(min_length=3, max_length=50)] = None,
+    team_filter: Annotated[Optional[TeamFilter], Query()] = None,
+    from_date: Annotated[Optional[date], Query(alias="from-date")] = None,
+    to_date: Annotated[Optional[date], Query(alias="to-date")] = None,
+    page: Annotated[int, Query(ge=1)] = 1,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    sort_by: Annotated[Optional[Literal[...]], Query()] = None,
+    sort_order: Annotated[Literal["asc", "desc"], Query()] = "asc",
+):
+    # Cross-parameter checks — all living inside the function
+    if team_filter and winner:
+        return {"Error": "team_filter and winner cannot be selected together."}
+    if (team_filter or winner) and status is not Status.completed and status is not None:
+        return {"Error": "team_filter or winner can only be used when status is 'completed'."}
+    if from_date and to_date and from_date > to_date:
+        return {"error": "from-date must be before to-date"}
+```
+
+There are two real problems as the API grows.
+
+**The signature is hard to read.** Eleven parameters in one function is a lot to scan. It's not obvious that `page` and `limit` belong together, or that `from_date` and `to_date` are a pair.
+
+**The cross-parameter validation is in the wrong place.** The three `if` checks at the top of the function are logically about "what makes these parameter combinations valid" — but they're buried inside filtering code. If you ever add another endpoint that accepts the same parameters, you'd have to copy all three checks there too, and keep them in sync forever.
+
+This lesson solves both problems.
+
+---
+
+## The Idea: Group Parameters into Models
+
+FastAPI lets you pass an entire Pydantic model as a query parameter group. Instead of declaring each parameter individually in the function signature, you define a model class and FastAPI automatically reads each of its fields from the query string.
+
+The `list_matches` signature goes from eleven individual parameters to four clean groups:
+
+```python title="matches.py - what we're building toward"
+def list_matches(
+    filters: Annotated[MatchFilters, Query()],
+    date_range: Annotated[DateRangeFilters, Query()],
+    pagination: Annotated[PaginationParams, Query()],
+    sorting: Annotated[SortParams, Query()],
+):
+```
+
+The URL still works exactly the same — users still send `?sport=football&page=2&from_date=2025-01-01`. FastAPI reads those values and populates the right model fields automatically. Nothing changes from the caller's perspective.
+
+---
+
+## Step 1 — Add Field, model_validator, field_validator, and computed_field to Imports
+
+The models use several tools from Pydantic that we haven't imported yet. Here's what each one does before we start using them:
+
+- **`Field()`** — the Pydantic equivalent of `Query()`, used inside model classes instead of function signatures. It's how you attach defaults, constraints, and documentation to a model field.
+- **`model_validator`** — lets you write a method that checks *relationships between fields*, like "these two fields can't both be set at the same time". It runs after Pydantic has parsed all the individual fields.
+- **`field_validator`** — lets you write a method that transforms or validates a *single field's value*, like stripping whitespace or converting to lowercase. It runs once for that specific field.
+- **`computed_field`** — lets you add a read-only property whose value is calculated from other fields. Pydantic treats it like any other field, but you never set it manually — it's always derived.
+
+```diff title="matches.py"
+- from pydantic import BaseModel
++ from pydantic import BaseModel, Field, computed_field, field_validator, model_validator
+```
+
+---
+
+## Step 2 — Add Validators to the Match Model
+
+Before we build the filter models, there's something to fix in `Match` itself. Right now, when a match is created, team names and venue are stored as-is — `"Arsenal"`, `"ARSENAL"`, and `"arsenal"` would all be stored differently. That makes matching later fragile: you'd have to call `.lower()` everywhere you compare.
+
+The cleaner approach is to normalize at the point of storage. Add `field_validator` methods to `Match` so that `home_team`, `away_team`, and `venue` are always lowercased when stored. Then the filtering code never needs to call `.lower()` at all.
+
+```diff title="matches.py"
+  class Match(BaseModel):
+      id: int
+      home_team: str
+      away_team: str
+      venue: Optional[str] = None
+      date: date
+      sport: Sport
+      status: Status
+      winner: Optional[Winner] = None
++
++     @field_validator('home_team', 'away_team')
++     @classmethod
++     def normalize_team_name(cls, value):
++         return value.strip().lower()
++
++     @field_validator('venue')
++     @classmethod
++     def normalize_venue(cls, value):
++         if value is not None:
++             return value.strip().lower()
++         return value
+```
+
+A few things to note. `@field_validator('home_team', 'away_team')` — you can pass multiple field names to the same validator, and Pydantic will run it for each one. `@classmethod` is required by Pydantic for field validators — it receives `cls` (the class itself) as the first argument, not `self` (an instance).
+
+`venue` gets its own validator because it's optional — it can be `None`, so we have to check before lowercasing. `home_team` and `away_team` are always present, so no `None` check is needed.
+
+Now the `INITIAL_DATA` entries can be written in normal casing — the validator normalizes them when the `Match` objects are created:
+
+```python
+Match(id=1, home_team="Arsenal", away_team="Chelsea", ...)
+# stored as: home_team="arsenal", away_team="chelsea"
+```
+
+---
+
+## Step 3 — Create the MatchFilters Model
+
+The filter parameters — `sport`, `status`, `winner`, `team`, and `team_filter` — all describe properties of a match to filter by. They belong together.
+
+```diff title="matches.py"
++ class MatchFilters(BaseModel):
++     sport: Optional[Sport] = Field(
++         None,
++         title="Sport Type",
++         description="Filter matches by sport",
++     )
++     status: Optional[Status] = Field(
++         None,
++         title="Match Status",
++         description="Filter by match status",
++     )
++     winner: Optional[Winner] = Field(
++         None,
++         title="Winner",
++         description="Filter by match winner",
++     )
++     team: Optional[str] = Field(
++         None,
++         min_length=3,
++         max_length=50,
++         pattern="^[A-Za-z0-9 ]+$",
++         title="Team Name",
++         description="Filter by team name. Case-insensitive partial match. Letters, numbers and spaces only.",
++     )
++     team_filter: Optional[TeamFilter] = Field(
++         None,
++         title="Team Result Filter",
++         description="Filter by how the team performed — won, lost, or draw. Requires team to be set.",
++     )
+```
+
+`sport`, `status`, `winner`, and `team_filter` use the same enums we've had since the beginning. Even though they don't need length or numeric constraints, they still get `Field()` so they can carry `title` and `description` — these appear in the auto-generated docs at `/docs`, exactly like `title` and `description` did on `Query()` in lesson two.
+
+`team` gets the full set of constraints we established in that same lesson: `min_length=3`, `max_length=50`, and the `pattern` that rejects special characters. `Field(None, min_length=3, ...)` behaves identically to `Query(min_length=3)` with `= None` as the default — same constraints, just written for a model field.
+
+### Moving the conflict checks into the model
+
+Now for the key move. These two checks currently sit at the top of `list_matches`:
+
+```python title="matches.py - currently in the function body"
+if team_filter and winner:
+    return {"Error": "team_filter and winner cannot be selected together."}
+if (team_filter or winner) and status is not Status.completed and status is not None:
+    return {"Error": "team_filter or winner can only be used when status is 'completed'."}
+```
+
+They're about what makes a valid combination of filter fields. They belong in `MatchFilters`. Add a `model_validator` and a `field_validator` for the team name:
+
+```diff title="matches.py"
+  class MatchFilters(BaseModel):
+      sport: Optional[Sport] = Field(None, title="Sport Type", ...)
+      status: Optional[Status] = Field(None, title="Match Status", ...)
+      winner: Optional[Winner] = Field(None, title="Winner", ...)
+      team: Optional[str] = Field(None, min_length=3, max_length=50, pattern="...", title="Team Name", ...)
+      team_filter: Optional[TeamFilter] = Field(None, title="Team Result Filter", ...)
++
++     @field_validator('team')
++     @classmethod
++     def normalize_team(cls, value):
++         if value is not None:
++             return value.strip().lower()
++         return value
++
++     @model_validator(mode='after')
++     def validate_winner_and_team_filter(self):
++         if self.team_filter and self.winner:
++             raise ValueError("team_filter and winner cannot be used together")
++         if (self.team_filter or self.winner) and self.status not in (Status.completed, None):
++             raise ValueError("team_filter and winner can only be used when status is 'completed'")
++         return self
+```
+
+The `field_validator` runs first — Pydantic processes individual field validators before the model validator. So by the time `validate_winner_and_team_filter` runs, `self.team` is already stripped and lowercased.
+
+`@model_validator(mode='after')` tells Pydantic to run this method after all fields have been parsed. At that point `self` holds the fully populated model, so you can check any combination of fields directly.
+
+When a check fails, `raise ValueError` — Pydantic catches it and FastAPI returns the same structured error response the user has seen from `Query` and `Path` validations in the previous lessons. When everything is valid, you return `self`.
+
+<Callout type="info" title="mode='after'">
+  The validator runs after Pydantic has already parsed and type-checked every individual field. This matters here because you need `self.status` to already be a `Status` enum — not a raw string — before you can compare it to `Status.completed`. `mode='before'` would run before parsing, when fields are still raw values coming in from the URL.
+</Callout>
+
+---
+
+## Step 4 — Create the DateRangeFilters Model
+
+`from_date` and `to_date` are a natural pair. Pulling them into their own model moves the third stray check out of `list_matches` — same technique as above:
+
+```diff title="matches.py"
++ class DateRangeFilters(BaseModel):
++     from_date: Optional[date] = Field(
++         None,
++         title="Start Date",
++         description="Filter matches on or after this date (YYYY-MM-DD)",
++     )
++     to_date: Optional[date] = Field(
++         None,
++         title="End Date",
++         description="Filter matches on or before this date (YYYY-MM-DD)",
++     )
++
++     @model_validator(mode='after')
++     def validate_date_range(self):
++         if self.from_date and self.to_date:
++             if self.from_date > self.to_date:
++                 raise ValueError("from_date must be before or equal to to_date")
++         return self
+```
+
+The check that previously lived as a stray `if` in `list_matches` now lives inside `DateRangeFilters`. It runs automatically whenever this model is used — you can't accidentally add a new endpoint with these parameters and forget to add the check.
+
+---
+
+## Step 5 — Create the PaginationParams Model
+
+`page` and `limit` go together — both control where in the result set the user is. This is also the model where the `computed_field` we covered at the end of this lesson actually lives in the real code — we'll add `offset` here so the function body can use it directly:
+
+First add `computed_field` to the Pydantic import (if you added all four in Step 1, you're already done):
+
+```diff title="matches.py"
+- from pydantic import BaseModel, Field, model_validator
++ from pydantic import BaseModel, Field, computed_field, field_validator, model_validator
+```
+
+Then define the model:
+
+```diff title="matches.py"
++ class PaginationParams(BaseModel):
++     page: int = Field(1, ge=1, description="Page number (1-indexed)")
++     limit: int = Field(20, ge=1, le=100, description="Items per page (max 100)")
++
++     @computed_field
++     @property
++     def offset(self) -> int:
++         return (self.page - 1) * self.limit
+```
+
+`Field(1, ge=1, ...)` — the first positional argument is the default value, then constraints. No `model_validator` needed here — there's no relationship between `page` and `limit` that requires a cross-field check. But `offset` is a value we'll compute from them in the function body anyway, so it makes sense to pre-calculate it here and access it as `pagination.offset`.
+
+---
+
+## Step 6 — Create the SortParams Model
+
+`sort_by` and `sort_order` control how results are ordered, not which results to include. They're a natural pair, separate from filtering.
+
+```diff title="matches.py"
++ class SortParams(BaseModel):
++     sort_by: Optional[Literal["date", "sport", "status"]] = Field(
++         None,
++         title="Sort By",
++         description="Field to sort results by",
++     )
++     sort_order: Literal["asc", "desc"] = Field(
++         "asc",
++         title="Sort Order",
++         description="Sort direction — asc for ascending, desc for descending",
++     )
+```
+
+`Literal["date", "sport", "status"]` is a type that only accepts those exact string values — anything else is rejected automatically. This is the right tool when you have a small, fixed set of valid options that don't warrant a full `Enum` class. `sort_order` works the same way — only `"asc"` or `"desc"` are accepted, with `"asc"` as the default.
+
+No `model_validator` is needed here because `sort_by` and `sort_order` don't have any conflict rules between them — any combination is valid.
+
+---
+
+## Step 7 — Update the Function Signature
+
+Replace all eleven individual parameters with the four models:
+
+```diff title="matches.py"
+  @app.get("/matches", tags=["Matches"])
+  def list_matches(
+-     sport: Annotated[Optional[Sport], Query(...)] = None,
+-     status: Annotated[Optional[Status], Query(...)] = None,
+-     winner: Annotated[Optional[Winner], Query()] = None,
+-     team_name: Annotated[Optional[str], Query(min_length=3, max_length=50)] = None,
+-     team_filter: Annotated[Optional[TeamFilter], Query()] = None,
+-     from_date: Annotated[Optional[date], Query(alias="from-date")] = None,
+-     to_date: Annotated[Optional[date], Query(alias="to-date")] = None,
+-     page: Annotated[int, Query(ge=1)] = 1,
+-     limit: Annotated[int, Query(ge=1, le=100)] = 20,
+-     sort_by: Annotated[Optional[Literal[...]], Query()] = None,
+-     sort_order: Annotated[Literal["asc", "desc"], Query()] = "asc",
++     filters: Annotated[MatchFilters, Query()],
++     date_range: Annotated[DateRangeFilters, Query()],
++     pagination: Annotated[PaginationParams, Query()],
++     sorting: Annotated[SortParams, Query()],
+  ):
+```
+
+`Annotated[MatchFilters, Query()]` tells FastAPI: treat this Pydantic model as a group of query parameters — read all its fields from the query string and populate the model automatically. Each field in `MatchFilters` becomes its own query parameter, exactly as if you had declared them individually. FastAPI figures this out from the `Query()` marker inside `Annotated`.
+
+---
+
+## Step 8 — Update the Function Body
+
+The filtering logic stays mostly the same — the variable names change, all three manual `if` checks at the top get deleted, and the `.lower()` calls on team names disappear because the `Match` model now normalizes everything on creation:
+
+```diff title="matches.py"
+  def list_matches(...):
+-     if team_filter and winner:
+-         return {"Error": "team_filter and winner cannot be selected together."}
+-     if (team_filter or winner) and status is not Status.completed and status is not None:
+-         return {"Error": "team_filter or winner can only be used when status is 'completed'."}
+-     if from_date and to_date and from_date > to_date:
+-         return {"error": "from-date must be before to-date"}
+-
+      matches = list(INITIAL_DATA)
+
+-     if sport:
+-         matches = [m for m in matches if m.sport == sport]
++     if filters.sport:
++         matches = [m for m in matches if m.sport == filters.sport]
+-     if status:
+-         matches = [m for m in matches if m.status == status]
++     if filters.status:
++         matches = [m for m in matches if m.status == filters.status]
+-     if winner:
+-         matches = [m for m in matches if m.winner == winner]
++     if filters.winner:
++         matches = [m for m in matches if m.winner == filters.winner]
+-     if team_name:
+-         team = team_name.lower()
+-         if team_filter is None:
+-             matches = [m for m in matches if team in m.home_team.lower() or team in m.away_team.lower()]
+-         elif team_filter == TeamFilter.won:
+-             matches = [m for m in matches if
+-                        (team == m.home_team.lower() and m.winner == Winner.home_team) or
+-                        (team == m.away_team.lower() and m.winner == Winner.away_team)]
++     if filters.team:
++         team = filters.team
++         if filters.team_filter is None:
++             matches = [m for m in matches if team in m.home_team or team in m.away_team]
++         elif filters.team_filter == TeamFilter.won:
++             matches = [m for m in matches if
++                        (team == m.home_team and m.winner == Winner.home_team) or
++                        (team == m.away_team and m.winner == Winner.away_team)]
+              ...
+-     if from_date:
+-         matches = [m for m in matches if m.date >= from_date]
++     if date_range.from_date:
++         matches = [m for m in matches if m.date >= date_range.from_date]
+-     if to_date:
+-         matches = [m for m in matches if m.date <= to_date]
++     if date_range.to_date:
++         matches = [m for m in matches if m.date <= date_range.to_date]
++
++     if sorting.sort_by:
++         reverse = sorting.sort_order == "desc"
++         matches = sorted(matches, key=lambda m: getattr(m, sorting.sort_by), reverse=reverse)
++
+-     start = (page - 1) * limit
+-     paginated = matches[start:start + limit]
+-     return {"total": total, "page": page, "limit": limit, "results": paginated}
++     paginated = matches[pagination.offset:pagination.offset + pagination.limit]
++     return {"total": total, "page": pagination.page, "limit": pagination.limit, "results": paginated}
+```
+
+The `.lower()` calls are gone because `Match` already stores everything lowercase — `filters.team` is also lowercase (the `normalize_team` validator handles that), so the comparison just works.
+
+The sorting block uses Python's built-in `sorted()`. `getattr(m, sorting.sort_by)` is a way to read an attribute by name — `getattr(m, "date")` is equivalent to `m.date`. This lets you sort by any field without writing a separate `if sort_by == "date": ...` block for each one. `reverse=True` means descending order, `reverse=False` means ascending.
+
+Because `MatchFilters` uses the actual enums, the comparisons stay exactly as they were — `m.sport == filters.sport`, `m.status == filters.status`. The models didn't change the types, they just gave the parameters a home.
+
+---
+
+## What the Models Bought Us
+
+```python title="Before — scattered across signature and function body"
+def list_matches(sport, status, winner, team_name, team_filter,
+                 from_date, to_date, page, limit, sort_by, sort_order):
+    if team_filter and winner: ...           # validation 1 — in function
+    if (team_filter or winner) and ...: ...  # validation 2 — in function
+    if from_date and to_date and ...: ...    # validation 3 — in function
+    # ... filtering logic ...
+```
+
+```python title="After — each concern has a home"
+def list_matches(filters, date_range, pagination, sorting):
+    # No manual checks — all validations run inside their models
+    # ... filtering and sorting logic only ...
+```
+
+The URL is unchanged. What changed is where the code lives. Parameters are grouped by what they describe, and cross-parameter checks belong to the models that own those fields.
+
+---
+
+## Reusing Models Across Endpoints
+
+Now that these are standalone classes, any future endpoint gets all their validation automatically:
+
+```python title="matches.py"
+@app.get("/matches/export", tags=["Matches"])
+def export_matches(
+    filters: Annotated[MatchFilters, Query()],        # conflict checks come for free
+    date_range: Annotated[DateRangeFilters, Query()], # date order check comes for free
+    sorting: Annotated[SortParams, Query()],          # sort params come for free
+):
+    ...
+```
+
+If you later change `max_length=50` to `max_length=30` on the team name, or add a new sortable field to `SortParams`, you change it once and every endpoint using those models is updated.
+
+---
+
+## What Else Can Go Inside a Pydantic Model
+
+We used `model_validator` to check relationships between fields. That's one of several things you can put inside a Pydantic model beyond just field definitions.
+
+### Field-level validators
+
+Run on a single field's value after it's parsed. Useful for transformations like normalizing input — stripping whitespace, lowercasing, reformatting dates, and so on.
+
+We use this in two places. In `MatchFilters`, we normalize the `team` search query so that a user sending `?team=  Arsenal ` gets matched correctly:
+
+```python title="matches.py"
+class MatchFilters(BaseModel):
+    team: Optional[str] = Field(None, min_length=3, max_length=50)
+
+    @field_validator('team')
+    @classmethod
+    def normalize_team(cls, value):
+        if value is not None:
+            return value.strip().lower()
+        return value
+```
+
+`value.strip()` removes leading and trailing whitespace — `"  Arsenal "` becomes `"Arsenal"`. `.lower()` then converts it to lowercase — `"Arsenal"` becomes `"arsenal"`. Since the `Match` model already stores team names in lowercase, the comparison just works without any extra `.lower()` in the filtering logic.
+
+In `Match`, we normalize how team names and venues are stored. This is the validator that makes case-insensitive search possible in the first place:
+
+```python title="matches.py"
+class Match(BaseModel):
+    ...
+
+    @field_validator('home_team', 'away_team')
+    @classmethod
+    def normalize_team_name(cls, value):
+        return value.strip().lower()
+
+    @field_validator('venue')
+    @classmethod
+    def normalize_venue(cls, value):
+        if value is not None:
+            return value.strip().lower()
+        return value
+```
+
+Now even if data comes in with inconsistent casing — `"Arsenal"`, `"ARSENAL"`, `"arsenal"` — it's always stored the same way. The filtering code never needs to call `.lower()` because the data is already normalized.
+
+<Callout type="info" title="Why normalize in Match instead of at query time?">
+  You could call `.lower()` every time you compare team names in the filtering logic, but that means every comparison in your function body carries that assumption. If you ever forget one, you get a subtle bug. Normalizing in `Match` when data is stored means the data is always consistent — the filtering code can just do `team in m.home_team` and trust it.
+</Callout>
+
+### Multiple model validators
+
+You can have more than one `@model_validator` in the same class — each checks a different cross-field concern:
+
+```python title="matches.py"
+class DateRangeFilters(BaseModel):
+    from_date: Optional[date] = None
+    to_date: Optional[date] = None
+
+    @model_validator(mode='after')
+    def validate_order(self):
+        if self.from_date and self.to_date and self.from_date > self.to_date:
+            raise ValueError("from_date must be before or equal to to_date")
+        return self
+
+    @model_validator(mode='after')
+    def validate_not_future(self):
+        if self.to_date and self.to_date > date.today():
+            raise ValueError("to_date cannot be in the future")
+        return self
+```
+
+Each validator handles one specific concern. Both run automatically, in the order they're defined.
+
+### Computed fields
+
+Fields whose value is derived from other fields — calculated once when the model is created. We already added `offset` to `PaginationParams` in Step 5. Here's what it looks like and why it's useful:
+
+```python title="matches.py"
+class PaginationParams(BaseModel):
+    page: int = Field(1, ge=1)
+    limit: int = Field(20, ge=1, le=100)
+
+    @computed_field
+    @property
+    def offset(self) -> int:
+        return (self.page - 1) * self.limit
+```
+
+Instead of writing `(pagination.page - 1) * pagination.limit` in the function body, you access `pagination.offset` — the calculation lives next to the fields it depends on, and the function body stays free of arithmetic.
+
+### Model config
+
+Class-level settings that change how the model behaves:
+
+```python title="matches.py"
+class MatchFilters(BaseModel):
+    model_config = {"extra": "forbid"}  # reject any unknown query params
+
+    sport: Optional[Sport] = None
+    ...
+```
+
+By default Pydantic silently ignores unknown fields — `?sport=football&typo=oops` works fine, `typo` is just dropped. With `extra: "forbid"`, the request is rejected with a validation error. Useful for internal APIs where you want to catch typos immediately, but avoid it for public APIs where adding a new optional parameter would break old clients.
+
+<Callout type="info" title="The Pattern to Remember">
+  Pydantic models are not just containers for data. They're the right place for any logic that's specifically about validating or transforming that data. If a check only makes sense given what a model's fields represent — whether one field contradicts another, whether a value needs normalizing, whether a derived value should be pre-computed — it belongs in the model, not scattered across your endpoint functions.
+
+  This keeps your endpoint functions focused on what they're supposed to do: filtering, querying, and returning results.
+</Callout>
+
+---
+
+## What's Next
+
+We've now validated every layer of our API's inputs — query parameters with `Query`, path parameters with `Path`, and cross-parameter relationships inside Pydantic models. In the final review lesson, we'll step back and look at the complete architecture of what we've built, and discuss what comes next in a real production API.
+
+<CopyFinalCode code={_fc} />

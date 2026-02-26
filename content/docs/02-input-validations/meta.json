@@ -1,5 +1,5 @@
 {
-  "title": "Improving the MiniApi",
+  "title": "Input Validations",
   "description": "Learn FastAPI by building a sports matches API from scratch, starting with strings and progressively adding type safety, validation, and filters.",
   "pages": [
     "01-pagination-sorting",
@@ -7,6 +7,7 @@
     "03-path-validation",
     "04-query-parameter-model",
     "05-body-field-validation",
-    "06-nested-models"
+    "06-nested-models",
+    "07-request-examples"
   ]
 }
