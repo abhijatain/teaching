@@ -1,0 +1,1015 @@
+---
+title: Updating Resources (PUT & PATCH)
+description: Learn the difference between PUT and PATCH, and implement validated update endpoints for your API.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { CopyFinalCode } from '@/components/copy-final-code';
+
+export const _fc = `from datetime import date
+from enum import Enum
+from typing import Annotated, List, Literal, Optional
+
+from fastapi import Body, FastAPI, Path, Query
+from pydantic import BaseModel, Field, model_validator
+
+app = FastAPI(title="Sports Matches API")
+
+
+class Sport(str, Enum):
+    football = "football"
+    cricket = "cricket"
+    hockey = "hockey"
+    basketball = "basketball"
+    baseball = "baseball"
+
+
+class Status(str, Enum):
+    upcoming = "upcoming"
+    cancelled = "cancelled"
+    abandoned = "abandoned"
+    completed = "completed"
+
+
+class Winner(str, Enum):
+    home_team = "home_team"
+    away_team = "away_team"
+    draw = "draw"
+
+
+class Player(BaseModel):
+    number: int = Field(ge=1, le=99, description="Jersey number", examples=[10])
+    name: str = Field(min_length=2, max_length=50, examples=["Lionel Messi"])
+    position: Literal["goalkeeper", "defender", "midfielder", "forward"] = Field(
+        examples=["forward"]
+    )
+    is_captain: bool = Field(default=False, examples=[True])
+
+
+class MatchEvent(BaseModel):
+    minute: int = Field(
+        ge=0, le=120, description="Minute when event occurred", examples=[45]
+    )
+    event_type: Literal["goal", "yellow_card", "red_card", "substitution"] = Field(
+        examples=["goal"]
+    )
+    team: Literal["home", "away"] = Field(examples=["home"])
+    player_name: str = Field(
+        min_length=2, max_length=50, examples=["Lionel Messi"]
+    )
+    description: Optional[str] = Field(
+        None, max_length=200, examples=["Right-footed shot from outside the box"]
+    )
+
+
+class TeamStats(BaseModel):
+    possession_percent: int = Field(ge=0, le=100, examples=[58])
+    shots: int = Field(ge=0, examples=[15])
+    shots_on_target: int = Field(ge=0, examples=[7])
+    corners: int = Field(ge=0, examples=[6])
+    fouls: int = Field(ge=0, examples=[12])
+
+    @model_validator(mode='after')
+    def validate_shots(self):
+        if self.shots_on_target > self.shots:
+            raise ValueError("shots_on_target cannot exceed total shots")
+        return self
+
+
+class MatchStatistics(BaseModel):
+    home_stats: TeamStats
+    away_stats: TeamStats
+    attendance: Optional[int] = Field(
+        None, ge=0, description="Number of spectators", examples=[60000]
+    )
+    referee: Optional[str] = Field(
+        None, min_length=2, max_length=50, examples=["Michael Oliver"]
+    )
+
+
+class Match(BaseModel):
+    id: int
+    home_team: str = Field(
+        min_length=2, max_length=50, examples=["Arsenal", "Real Madrid"]
+    )
+    away_team: str = Field(
+        min_length=2, max_length=50, examples=["Chelsea", "Barcelona"]
+    )
+    venue: Optional[str] = Field(
+        None,
+        min_length=3,
+        max_length=100,
+        examples=["Emirates Stadium", "Santiago Bernabeu"],
+    )
+    date: date = Field(examples=["2026-03-15"])
+    sport: Sport
+    status: Status
+    winner: Optional[Winner] = None
+    score_home: Optional[int] = Field(
+        None, ge=0, description="Home team score", examples=[3]
+    )
+    score_away: Optional[int] = Field(
+        None, ge=0, description="Away team score", examples=[1]
+    )
+    home_lineup: Optional[List[Player]] = None
+    away_lineup: Optional[List[Player]] = None
+    events: List[MatchEvent] = Field(default_factory=list)
+    statistics: Optional[MatchStatistics] = None
+
+    @model_validator(mode='after')
+    def validate_match_logic(self):
+        if self.home_team == self.away_team:
+            raise ValueError("home_team and away_team must be different")
+        if self.status == Status.completed:
+            if self.score_home is None or self.score_away is None:
+                raise ValueError("Completed matches must have scores")
+            if self.winner is None:
+                raise ValueError("Completed matches must have a winner")
+        if self.status != Status.completed and self.winner is not None:
+            raise ValueError("Only completed matches can have a winner")
+        return self
+
+
+class MatchUpdate(BaseModel):
+    """Model for partial updates to a match. All fields are optional."""
+    venue: Optional[str] = Field(
+        None,
+        min_length=3,
+        max_length=100,
+        examples=["Wembley Stadium"],
+    )
+    date: Optional[date] = Field(None, examples=["2026-04-20"])
+    status: Optional[Status] = None
+    winner: Optional[Winner] = None
+    score_home: Optional[int] = Field(None, ge=0, examples=[2])
+    score_away: Optional[int] = Field(None, ge=0, examples=[2])
+    home_lineup: Optional[List[Player]] = None
+    away_lineup: Optional[List[Player]] = None
+    events: Optional[List[MatchEvent]] = None
+    statistics: Optional[MatchStatistics] = None
+
+    @model_validator(mode='after')
+    def validate_update_logic(self):
+        # If updating to completed, scores must be provided
+        if self.status == Status.completed:
+            if self.score_home is None or self.score_away is None:
+                raise ValueError("Cannot set status to completed without providing both scores")
+        
+        # If both scores are provided, they should be valid
+        if self.score_home is not None and self.score_away is not None:
+            if self.score_home < 0 or self.score_away < 0:
+                raise ValueError("Scores cannot be negative")
+        
+        return self
+
+
+class MatchFilters(BaseModel):
+    sport: Optional[Sport] = Field(
+        None, title="Sport Type", description="Filter matches by sport"
+    )
+    status: Optional[Status] = Field(
+        None, title="Match Status", description="Filter by match status"
+    )
+    winner: Optional[Winner] = None
+    team: Optional[str] = Field(
+        None,
+        min_length=3,
+        max_length=50,
+        description="Filter by team name (case-insensitive partial match)",
+        examples=["Arsenal"],
+    )
+
+
+class DateRangeFilters(BaseModel):
+    from_date: Optional[date] = Field(
+        None,
+        description="Matches on or after this date (YYYY-MM-DD)",
+        examples=["2026-01-01"],
+    )
+    to_date: Optional[date] = Field(
+        None,
+        description="Matches on or before this date (YYYY-MM-DD)",
+        examples=["2026-12-31"],
+    )
+
+    @model_validator(mode='after')
+    def validate_date_range(self):
+        if self.from_date and self.to_date:
+            if self.from_date > self.to_date:
+                raise ValueError("from_date must be before or equal to to_date")
+        return self
+
+
+class PaginationParams(BaseModel):
+    page: int = Field(1, ge=1, description="Page number (1-indexed)")
+    limit: int = Field(20, ge=1, le=100, description="Items per page (max 100)")
+
+
+INITIAL_DATA: List[Match] = [
+    Match(
+        id=1,
+        home_team="Arsenal",
+        away_team="Chelsea",
+        sport=Sport.football,
+        date=date(2025, 10, 21),
+        status=Status.completed,
+        winner=Winner.draw,
+        venue="Emirates Stadium",
+        score_home=2,
+        score_away=2,
+    ),
+    Match(
+        id=2,
+        home_team="Lakers",
+        away_team="Warriors",
+        sport=Sport.basketball,
+        date=date(2025, 11, 15),
+        status=Status.completed,
+        winner=Winner.home_team,
+        venue="Crypto.com Arena",
+        score_home=112,
+        score_away=98,
+    ),
+    Match(
+        id=3,
+        home_team="Real Madrid",
+        away_team="Barcelona",
+        sport=Sport.football,
+        date=date(2026, 4, 10),
+        status=Status.completed,
+        winner=Winner.draw,
+        venue="Santiago Bernabeu",
+        score_home=1,
+        score_away=1,
+    ),
+    Match(
+        id=4,
+        home_team="Knicks",
+        away_team="Celtics",
+        sport=Sport.basketball,
+        date=date(2026, 3, 5),
+        status=Status.upcoming,
+        winner=None,
+        venue="Madison Square Garden",
+    ),
+]
+
+
+@app.get("/health", tags=["System"])
+def health_check():
+    return {"status": "ok"}
+
+
+@app.get("/matches", tags=["Matches"])
+def list_matches(
+    filters: Annotated[MatchFilters, Query()],
+    date_range: Annotated[DateRangeFilters, Query()],
+    pagination: Annotated[PaginationParams, Query()],
+):
+    matches = list(INITIAL_DATA)
+
+    if filters.sport:
+        matches = [m for m in matches if m.sport == filters.sport]
+    if filters.status:
+        matches = [m for m in matches if m.status == filters.status]
+    if filters.winner:
+        matches = [m for m in matches if m.winner == filters.winner]
+    if filters.team:
+        team_lower = filters.team.lower()
+        matches = [
+            m
+            for m in matches
+            if team_lower in m.home_team.lower() or team_lower in m.away_team.lower()
+        ]
+
+    if date_range.from_date:
+        matches = [m for m in matches if m.date >= date_range.from_date]
+    if date_range.to_date:
+        matches = [m for m in matches if m.date <= date_range.to_date]
+
+    total = len(matches)
+    start = (pagination.page - 1) * pagination.limit
+    paginated = matches[start : start + pagination.limit]
+
+    return {
+        "total": total,
+        "page": pagination.page,
+        "limit": pagination.limit,
+        "results": paginated,
+    }
+
+
+@app.get("/matches/{match_id}", tags=["Matches"])
+def get_match_by_id(
+    match_id: Annotated[
+        int,
+        Path(
+            ge=1,
+            title="Match ID",
+            description="The unique identifier of the match (must be positive)",
+        ),
+    ],
+):
+    for match in INITIAL_DATA:
+        if match.id == match_id:
+            return match
+    return {"error": "Match not found"}, 404
+
+
+@app.post("/matches", tags=["Matches"])
+def create_match(
+    match: Annotated[
+        Match,
+        Body(
+            openapi_examples={
+                "basic": {
+                    "summary": "Basic upcoming match",
+                    "description": "Create a simple match with minimal required fields",
+                    "value": {
+                        "home_team": "Arsenal",
+                        "away_team": "Chelsea",
+                        "sport": "football",
+                        "date": "2026-03-15",
+                        "status": "upcoming",
+                        "venue": "Emirates Stadium",
+                    },
+                },
+                "completed": {
+                    "summary": "Completed match with scores",
+                    "description": "A finished match with final scores",
+                    "value": {
+                        "home_team": "Real Madrid",
+                        "away_team": "Barcelona",
+                        "sport": "football",
+                        "date": "2025-10-26",
+                        "status": "completed",
+                        "venue": "Santiago Bernabeu",
+                        "score_home": 2,
+                        "score_away": 1,
+                        "winner": "home_team",
+                    },
+                },
+            }
+        ),
+    ]
+):
+    """Create a new match with validation."""
+    if match.status == Status.upcoming and match.date < date.today():
+        return {"error": "Upcoming match date cannot be in the past."}, 400
+
+    match.id = INITIAL_DATA[-1].id + 1 if INITIAL_DATA else 1
+    INITIAL_DATA.append(match)
+    return match
+
+
+@app.put("/matches/{match_id}", tags=["Matches"])
+def replace_match(
+    match_id: Annotated[int, Path(ge=1, title="Match ID")],
+    match: Annotated[
+        Match,
+        Body(
+            openapi_examples={
+                "complete_replacement": {
+                    "summary": "Complete match replacement",
+                    "description": "Replace entire match with new data",
+                    "value": {
+                        "home_team": "Arsenal",
+                        "away_team": "Chelsea",
+                        "sport": "football",
+                        "date": "2026-05-15",
+                        "status": "completed",
+                        "venue": "Wembley Stadium",
+                        "score_home": 3,
+                        "score_away": 1,
+                        "winner": "home_team",
+                    },
+                }
+            }
+        ),
+    ],
+):
+    """
+    Replace an entire match with new data (PUT).
+    
+    All fields must be provided. This completely replaces the existing match.
+    Use PATCH if you only want to update specific fields.
+    """
+    for i, existing_match in enumerate(INITIAL_DATA):
+        if existing_match.id == match_id:
+            match.id = match_id  # Preserve the ID
+            INITIAL_DATA[i] = match
+            return match
+    
+    return {"error": "Match not found"}, 404
+
+
+@app.patch("/matches/{match_id}", tags=["Matches"])
+def update_match(
+    match_id: Annotated[int, Path(ge=1, title="Match ID")],
+    update: Annotated[
+        MatchUpdate,
+        Body(
+            openapi_examples={
+                "update_venue": {
+                    "summary": "Update venue only",
+                    "description": "Change the match venue without affecting other fields",
+                    "value": {
+                        "venue": "Wembley Stadium"
+                    },
+                },
+                "record_result": {
+                    "summary": "Record match result",
+                    "description": "Update a completed match with scores and winner",
+                    "value": {
+                        "status": "completed",
+                        "score_home": 3,
+                        "score_away": 1,
+                        "winner": "home_team"
+                    },
+                },
+                "add_lineup": {
+                    "summary": "Add team lineup",
+                    "description": "Add starting lineup before match",
+                    "value": {
+                        "home_lineup": [
+                            {
+                                "number": 1,
+                                "name": "Aaron Ramsdale",
+                                "position": "goalkeeper",
+                                "is_captain": False
+                            },
+                            {
+                                "number": 10,
+                                "name": "Martin Odegaard",
+                                "position": "midfielder",
+                                "is_captain": True
+                            }
+                        ]
+                    },
+                },
+            }
+        ),
+    ],
+):
+    """
+    Partially update a match (PATCH).
+    
+    Only provided fields will be updated. Omitted fields remain unchanged.
+    This is the preferred method for updating specific fields.
+    """
+    for match in INITIAL_DATA:
+        if match.id == match_id:
+            # Update only the provided fields
+            update_data = update.model_dump(exclude_unset=True)
+            
+            for field, value in update_data.items():
+                setattr(match, field, value)
+            
+            # Re-validate the complete match after updates
+            try:
+                Match.model_validate(match)
+            except ValueError as e:
+                return {"error": f"Update would create invalid match: {str(e)}"}, 400
+            
+            return match
+    
+    return {"error": "Match not found"}, 404
+`;
+
+# Updating Resources (PUT & PATCH)
+
+You've learned to create matches with `POST` and retrieve them with `GET`. Now it's time to update existing resources. HTTP provides two methods for updates: `PUT` for full replacement and `PATCH` for partial updates. In this lesson, you'll learn when to use each and how to implement them with proper validation.
+
+---
+
+## Where We Are
+
+Your API currently supports:
+- `POST /matches` — Create new matches
+- `GET /matches` — List matches with filters
+- `GET /matches/{match_id}` — Get a specific match
+
+But what happens when:
+- A match venue changes?
+- You need to record the final score?
+- The match date gets rescheduled?
+- You want to add lineups after the match is created?
+
+You need update endpoints.
+
+---
+
+## PUT vs PATCH: The Difference
+
+HTTP defines two methods for updates, and they're not interchangeable:
+
+| | PUT | PATCH |
+|---|-----|-------|
+| **Meaning** | Replace entire resource | Update specific fields |
+| **Requires** | All fields (complete replacement) | Only fields being changed |
+| **Idempotent** | Yes — same request = same result | Yes — same request = same result |
+| **Use when** | You have complete new data | You want to change a few fields |
+
+**Example scenario:**
+
+```python
+# Current match
+{
+  "id": 1,
+  "home_team": "Arsenal",
+  "away_team": "Chelsea",
+  "sport": "football",
+  "date": "2026-03-15",
+  "status": "upcoming",
+  "venue": "Emirates Stadium"
+}
+```
+
+**With PUT** — Must send all fields:
+```json
+PUT /matches/1
+{
+  "home_team": "Arsenal",
+  "away_team": "Chelsea",
+  "sport": "football",
+  "date": "2026-03-20",     ← Changed
+  "status": "upcoming",
+  "venue": "Emirates Stadium"
+}
+```
+
+**With PATCH** — Send only what changed:
+```json
+PATCH /matches/1
+{
+  "date": "2026-03-20"  ← Only this
+}
+```
+
+<Callout type="info" title="When to Use Which">
+- **Use PATCH** for most updates — it's more flexible and efficient
+- **Use PUT** when you truly need to replace the entire resource
+- In practice, APIs often provide PATCH but not PUT, since partial updates are more common
+</Callout>
+
+---
+
+## Step 1 — Create a PATCH Endpoint
+
+Start with PATCH since it's the most commonly needed. First, create a model for updates:
+
+```python title="matches.py - add before endpoints"
+class MatchUpdate(BaseModel):
+    """Model for partial updates to a match. All fields are optional."""
+    venue: Optional[str] = Field(
+        None,
+        min_length=3,
+        max_length=100,
+        examples=["Wembley Stadium"],
+    )
+    date: Optional[date] = Field(None, examples=["2026-04-20"])
+    status: Optional[Status] = None
+    winner: Optional[Winner] = None
+    score_home: Optional[int] = Field(None, ge=0, examples=[2])
+    score_away: Optional[int] = Field(None, ge=0, examples=[2])
+    home_lineup: Optional[List[Player]] = None
+    away_lineup: Optional[List[Player]] = None
+    events: Optional[List[MatchEvent]] = None
+    statistics: Optional[MatchStatistics] = None
+```
+
+Notice every field is `Optional` and has a default of `None`. This is the key difference from `Match`:
+
+```python title="Comparing Match vs MatchUpdate"
+# Match — some fields required
+class Match(BaseModel):
+    home_team: str  # Required!
+    date: date      # Required!
+    
+# MatchUpdate — everything optional
+class MatchUpdate(BaseModel):
+    venue: Optional[str] = None  # Optional
+    date: Optional[date] = None   # Optional
+```
+
+Why? Because with PATCH, the user only sends fields they want to change. If they don't send `venue`, it means "don't change the venue," not "set venue to None."
+
+Now add the endpoint:
+
+```python title="matches.py"
+@app.patch("/matches/{match_id}", tags=["Matches"])
+def update_match(
+    match_id: Annotated[int, Path(ge=1, title="Match ID")],
+    update: MatchUpdate,
+):
+    """
+    Partially update a match (PATCH).
+    
+    Only provided fields will be updated. Omitted fields remain unchanged.
+    """
+    for match in INITIAL_DATA:
+        if match.id == match_id:
+            # Update only the provided fields
+            update_data = update.model_dump(exclude_unset=True)
+            
+            for field, value in update_data.items():
+                setattr(match, field, value)
+            
+            return match
+    
+    return {"error": "Match not found"}, 404
+```
+
+Breaking down the key line:
+
+```python title="Understanding exclude_unset"
+update_data = update.model_dump(exclude_unset=True)
+#                               ^^^^^^^^^^^^^^^^^^
+#                               Only include fields the user actually sent
+```
+
+`exclude_unset=True` means "give me a dict with only the fields that were explicitly set by the user, not fields that defaulted to None."
+
+Example:
+```python
+# User sends: {"venue": "Wembley Stadium"}
+update_data = {"venue": "Wembley Stadium"}  # Only this field
+
+# Without exclude_unset=True, you'd get:
+update_data = {
+    "venue": "Wembley Stadium",
+    "date": None,
+    "status": None,
+    "winner": None,
+    # ... all fields, even ones not sent
+}
+```
+
+<Callout type="warn" title="Why exclude_unset Matters">
+Without `exclude_unset=True`, fields the user didn't send would be set to `None`, potentially erasing existing data. You'd turn a venue update into accidentally clearing the match date, status, and scores!
+</Callout>
+
+---
+
+## Testing the PATCH Endpoint
+
+Try updating just the venue. In `/docs`, find `PATCH /matches/{match_id}`:
+
+```json title="Request body"
+{
+  "venue": "Wembley Stadium"
+}
+```
+
+Result:
+```json
+{
+  "id": 1,
+  "home_team": "Arsenal",
+  "away_team": "Chelsea",
+  "sport": "football",
+  "date": "2025-10-21",
+  "status": "completed",
+  "venue": "Wembley Stadium",  ← Changed
+  "score_home": 2,
+  "score_away": 2,
+  "winner": "draw"
+}
+```
+
+Only the venue changed. Everything else stayed the same.
+
+Try recording a match result:
+
+```json title="Update match to completed"
+{
+  "status": "completed",
+  "score_home": 3,
+  "score_away": 1,
+  "winner": "home_team"
+}
+```
+
+Multiple fields updated at once, but all other fields remain unchanged.
+
+---
+
+## Step 2 — Add Validation to Updates
+
+The current implementation has a problem: you can create invalid states by updating fields in isolation:
+
+```json title="This should fail but doesn't"
+PATCH /matches/4
+{
+  "status": "completed"
+}
+```
+
+You just marked a match as completed without providing scores or a winner. The match is now in an invalid state!
+
+Fix this by adding validation to `MatchUpdate`:
+
+```python title="matches.py"
+class MatchUpdate(BaseModel):
+    """Model for partial updates to a match. All fields are optional."""
+    venue: Optional[str] = Field(None, min_length=3, max_length=100)
+    date: Optional[date] = None
+    status: Optional[Status] = None
+    winner: Optional[Winner] = None
+    score_home: Optional[int] = Field(None, ge=0)
+    score_away: Optional[int] = Field(None, ge=0)
+    home_lineup: Optional[List[Player]] = None
+    away_lineup: Optional[List[Player]] = None
+    events: Optional[List[MatchEvent]] = None
+    statistics: Optional[MatchStatistics] = None
+
+    @model_validator(mode='after')  # !mark
+    def validate_update_logic(self):  # !mark
+        # If updating to completed, scores must be provided
+        if self.status == Status.completed:  # !mark
+            if self.score_home is None or self.score_away is None:  # !mark
+                raise ValueError(  # !mark
+                    "Cannot set status to completed without providing both scores"  # !mark
+                )  # !mark
+        return self  # !mark
+```
+
+Now try that invalid update again:
+
+```json title="Request"
+{
+  "status": "completed"
+}
+```
+
+Response:
+```json title="Validation error"
+{
+  "detail": [
+    {
+      "loc": ["body"],
+      "msg": "Cannot set status to completed without providing both scores",
+      "type": "value_error"
+    }
+  ]
+}
+```
+
+The validator catches the problem before the update is applied.
+
+But there's still an issue: what if the existing match already has `score_home` but you're only updating `score_away`? The validator only sees the update fields, not the complete match.
+
+<Callout type="warn" title="The Partial Update Validation Problem">
+`MatchUpdate` validators can only validate the fields being updated, not the complete final state. You need a second layer of validation that checks the complete match after the update is applied.
+</Callout>
+
+---
+
+## Step 3 — Validate the Complete Match After Updates
+
+Update your endpoint to re-validate the complete match after applying changes:
+
+```python title="matches.py"
+@app.patch("/matches/{match_id}", tags=["Matches"])
+def update_match(
+    match_id: Annotated[int, Path(ge=1, title="Match ID")],
+    update: MatchUpdate,
+):
+    """Partially update a match with validation of the final state."""
+    for match in INITIAL_DATA:
+        if match.id == match_id:
+            # Update only the provided fields
+            update_data = update.model_dump(exclude_unset=True)
+            
+            for field, value in update_data.items():
+                setattr(match, field, value)
+            
+            # Re-validate the complete match after updates  # !mark
+            try:  # !mark
+                Match.model_validate(match)  # !mark
+            except ValueError as e:  # !mark
+                return {"error": f"Update would create invalid match: {str(e)}"}, 400  # !mark
+            
+            return match
+    
+    return {"error": "Match not found"}, 404
+```
+
+`Match.model_validate(match)` validates the complete match object using all the validation rules from the `Match` model. If the update would create an invalid state (like completed status without scores), it's caught here.
+
+Now the validation happens in two phases:
+1. **MatchUpdate validators** — Check that the update fields themselves are valid
+2. **Match validators** — Check that the complete match (existing + updates) is valid
+
+<Callout type="info" title="Two-Layer Validation for Updates">
+- **Layer 1** (`MatchUpdate` validators): Validate the update request is reasonable
+- **Layer 2** (`Match.model_validate`): Validate the final result is valid
+  
+This pattern ensures you can't create invalid states through partial updates.
+</Callout>
+
+---
+
+## Step 4 — Add a PUT Endpoint (Full Replacement)
+
+PUT replaces the entire resource. The model is just `Match`, not `MatchUpdate`, because all fields are required:
+
+```python title="matches.py"
+@app.put("/matches/{match_id}", tags=["Matches"])
+def replace_match(
+    match_id: Annotated[int, Path(ge=1, title="Match ID")],
+    match: Match,
+):
+    """
+    Replace an entire match with new data (PUT).
+    
+    All fields must be provided. This completely replaces the existing match.
+    Use PATCH if you only want to update specific fields.
+    """
+    for i, existing_match in enumerate(INITIAL_DATA):
+        if existing_match.id == match_id:
+            match.id = match_id  # Preserve the ID
+            INITIAL_DATA[i] = match
+            return match
+    
+    return {"error": "Match not found"}, 404
+```
+
+Notice:
+- Parameter is `match: Match`, not `match: MatchUpdate`
+- All fields must be provided (they're required in the `Match` model)
+- We preserve the ID from the URL (don't let the user change it)
+- We replace the entire match in the list
+
+Test it:
+
+```json title="PUT request — all fields required"
+PUT /matches/1
+{
+  "home_team": "Arsenal",
+  "away_team": "Chelsea",
+  "sport": "football",
+  "date": "2026-05-15",
+  "status": "completed",
+  "venue": "Wembley Stadium",
+  "score_home": 3,
+  "score_away": 1,
+  "winner": "home_team"
+}
+```
+
+If you omit any required field, you get a validation error — PUT requires the complete resource.
+
+---
+
+## Step 5 — Add Examples for Update Endpoints
+
+Make the docs clearer by adding examples:
+
+```python title="matches.py"
+@app.patch("/matches/{match_id}", tags=["Matches"])
+def update_match(
+    match_id: Annotated[int, Path(ge=1, title="Match ID")],
+    update: Annotated[
+        MatchUpdate,
+        Body(
+            openapi_examples={
+                "update_venue": {
+                    "summary": "Update venue only",
+                    "description": "Change the match venue without affecting other fields",
+                    "value": {"venue": "Wembley Stadium"},
+                },
+                "record_result": {
+                    "summary": "Record match result",
+                    "description": "Update a completed match with scores and winner",
+                    "value": {
+                        "status": "completed",
+                        "score_home": 3,
+                        "score_away": 1,
+                        "winner": "home_team",
+                    },
+                },
+                "add_lineup": {
+                    "summary": "Add team lineup",
+                    "description": "Add starting lineup before match",
+                    "value": {
+                        "home_lineup": [
+                            {
+                                "number": 1,
+                                "name": "Aaron Ramsdale",
+                                "position": "goalkeeper",
+                                "is_captain": False,
+                            },
+                            {
+                                "number": 10,
+                                "name": "Martin Odegaard",
+                                "position": "midfielder",
+                                "is_captain": True,
+                            },
+                        ]
+                    },
+                },
+            }
+        ),
+    ],
+):
+    # ... same implementation ...
+```
+
+Now users see three common update scenarios in the docs, making it clear how to use PATCH for different purposes.
+
+---
+
+## PUT vs PATCH: When to Use Each
+
+**Use PATCH when:**
+- ✅ Updating specific fields (most common case)
+- ✅ User doesn't have/need the complete resource
+- ✅ You want to avoid accidentally clearing unrelated fields
+- ✅ Building user-friendly APIs
+
+**Use PUT when:**
+- ✅ You truly want to replace the entire resource
+- ✅ Your API design requires full replacements
+- ✅ You have a "reset to default" operation
+
+**In practice:** Most modern APIs only implement PATCH. PUT is less common because full replacement is rarely what users actually need.
+
+<Callout type="info" title="REST Purists vs Pragmatists">
+REST purists say you should implement both PUT and PATCH. Pragmatists say most APIs only need PATCH since partial updates are what users actually want. This tutorial shows you both so you can make an informed choice, but in real projects, PATCH alone is often sufficient.
+</Callout>
+
+---
+
+## Common Patterns for Update Validation
+
+```python title="Validation patterns for updates"
+class ResourceUpdate(BaseModel):
+    # Pattern 1: Field-level validation still applies
+    name: Optional[str] = Field(None, min_length=2, max_length=50)
+    
+    # Pattern 2: Validate update fields make sense together
+    @model_validator(mode='after')
+    def validate_update_fields(self):
+        if self.status == "completed" and self.score is None:
+            raise ValueError("Need score when marking as completed")
+        return self
+
+# Pattern 3: Validate final state after applying update
+@app.patch("/resource/{id}")
+def update_resource(id: int, update: ResourceUpdate):
+    # Apply updates
+    for field, value in update.model_dump(exclude_unset=True).items():
+        setattr(resource, field, value)
+    
+    # Validate complete resource
+    try:
+        Resource.model_validate(resource)
+    except ValueError as e:
+        return {"error": str(e)}, 400
+    
+    return resource
+```
+
+This three-layer approach ensures:
+1. Individual update fields are valid
+2. Update fields work together
+3. Final resource state is valid
+
+---
+
+## What You've Learned
+
+```python title="Update patterns"
+# PATCH — partial updates
+class ResourceUpdate(BaseModel):
+    field: Optional[Type] = None  # Everything optional
+
+@app.patch("/resource/{id}")
+def update(id: int, update: ResourceUpdate):
+    # Only update fields that were sent
+    update_data = update.model_dump(exclude_unset=True)
+    # Validate final state
+    Resource.model_validate(resource)
+
+# PUT — full replacement
+@app.put("/resource/{id}")
+def replace(id: int, resource: Resource):
+    # All fields required
+    # Replace entire resource
+```
+
+Key concepts:
+- **PATCH** for partial updates (most common)
+- **PUT** for full replacement (less common)
+- `exclude_unset=True` for partial updates
+- Two-layer validation (update + final state)
+- Examples showing common update scenarios
+
+---
+
+## What's Next
+
+You can now create, read, and update resources. The final piece of CRUD is **DELETE**. In the next lesson, you'll learn how to safely remove resources with proper validation and error handling.
+
+<CopyFinalCode code={_fc} />

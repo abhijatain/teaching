@@ -1,0 +1,1012 @@
+---
+title: Deleting Resources (DELETE)
+description: Implement safe deletion endpoints with proper validation, error handling, and considerations for production systems.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { CopyFinalCode } from '@/components/copy-final-code';
+
+export const _fc = `from datetime import date
+from enum import Enum
+from typing import Annotated, List, Literal, Optional
+
+from fastapi import Body, FastAPI, Path, Query, status
+from pydantic import BaseModel, Field, model_validator
+
+app = FastAPI(title="Sports Matches API")
+
+
+class Sport(str, Enum):
+    football = "football"
+    cricket = "cricket"
+    hockey = "hockey"
+    basketball = "basketball"
+    baseball = "baseball"
+
+
+class Status(str, Enum):
+    upcoming = "upcoming"
+    cancelled = "cancelled"
+    abandoned = "abandoned"
+    completed = "completed"
+
+
+class Winner(str, Enum):
+    home_team = "home_team"
+    away_team = "away_team"
+    draw = "draw"
+
+
+class Player(BaseModel):
+    number: int = Field(ge=1, le=99, description="Jersey number", examples=[10])
+    name: str = Field(min_length=2, max_length=50, examples=["Lionel Messi"])
+    position: Literal["goalkeeper", "defender", "midfielder", "forward"] = Field(
+        examples=["forward"]
+    )
+    is_captain: bool = Field(default=False, examples=[True])
+
+
+class MatchEvent(BaseModel):
+    minute: int = Field(
+        ge=0, le=120, description="Minute when event occurred", examples=[45]
+    )
+    event_type: Literal["goal", "yellow_card", "red_card", "substitution"] = Field(
+        examples=["goal"]
+    )
+    team: Literal["home", "away"] = Field(examples=["home"])
+    player_name: str = Field(
+        min_length=2, max_length=50, examples=["Lionel Messi"]
+    )
+    description: Optional[str] = Field(
+        None, max_length=200, examples=["Right-footed shot from outside the box"]
+    )
+
+
+class TeamStats(BaseModel):
+    possession_percent: int = Field(ge=0, le=100, examples=[58])
+    shots: int = Field(ge=0, examples=[15])
+    shots_on_target: int = Field(ge=0, examples=[7])
+    corners: int = Field(ge=0, examples=[6])
+    fouls: int = Field(ge=0, examples=[12])
+
+    @model_validator(mode='after')
+    def validate_shots(self):
+        if self.shots_on_target > self.shots:
+            raise ValueError("shots_on_target cannot exceed total shots")
+        return self
+
+
+class MatchStatistics(BaseModel):
+    home_stats: TeamStats
+    away_stats: TeamStats
+    attendance: Optional[int] = Field(
+        None, ge=0, description="Number of spectators", examples=[60000]
+    )
+    referee: Optional[str] = Field(
+        None, min_length=2, max_length=50, examples=["Michael Oliver"]
+    )
+
+
+class Match(BaseModel):
+    id: int
+    home_team: str = Field(
+        min_length=2, max_length=50, examples=["Arsenal", "Real Madrid"]
+    )
+    away_team: str = Field(
+        min_length=2, max_length=50, examples=["Chelsea", "Barcelona"]
+    )
+    venue: Optional[str] = Field(
+        None,
+        min_length=3,
+        max_length=100,
+        examples=["Emirates Stadium", "Santiago Bernabeu"],
+    )
+    date: date = Field(examples=["2026-03-15"])
+    sport: Sport
+    status: Status
+    winner: Optional[Winner] = None
+    score_home: Optional[int] = Field(
+        None, ge=0, description="Home team score", examples=[3]
+    )
+    score_away: Optional[int] = Field(
+        None, ge=0, description="Away team score", examples=[1]
+    )
+    home_lineup: Optional[List[Player]] = None
+    away_lineup: Optional[List[Player]] = None
+    events: List[MatchEvent] = Field(default_factory=list)
+    statistics: Optional[MatchStatistics] = None
+
+    @model_validator(mode='after')
+    def validate_match_logic(self):
+        if self.home_team == self.away_team:
+            raise ValueError("home_team and away_team must be different")
+        if self.status == Status.completed:
+            if self.score_home is None or self.score_away is None:
+                raise ValueError("Completed matches must have scores")
+            if self.winner is None:
+                raise ValueError("Completed matches must have a winner")
+        if self.status != Status.completed and self.winner is not None:
+            raise ValueError("Only completed matches can have a winner")
+        return self
+
+
+class MatchUpdate(BaseModel):
+    """Model for partial updates to a match. All fields are optional."""
+    venue: Optional[str] = Field(
+        None,
+        min_length=3,
+        max_length=100,
+        examples=["Wembley Stadium"],
+    )
+    date: Optional[date] = Field(None, examples=["2026-04-20"])
+    status: Optional[Status] = None
+    winner: Optional[Winner] = None
+    score_home: Optional[int] = Field(None, ge=0, examples=[2])
+    score_away: Optional[int] = Field(None, ge=0, examples=[2])
+    home_lineup: Optional[List[Player]] = None
+    away_lineup: Optional[List[Player]] = None
+    events: Optional[List[MatchEvent]] = None
+    statistics: Optional[MatchStatistics] = None
+
+    @model_validator(mode='after')
+    def validate_update_logic(self):
+        if self.status == Status.completed:
+            if self.score_home is None or self.score_away is None:
+                raise ValueError(
+                    "Cannot set status to completed without providing both scores"
+                )
+        return self
+
+
+class MatchFilters(BaseModel):
+    sport: Optional[Sport] = Field(
+        None, title="Sport Type", description="Filter matches by sport"
+    )
+    status: Optional[Status] = Field(
+        None, title="Match Status", description="Filter by match status"
+    )
+    winner: Optional[Winner] = None
+    team: Optional[str] = Field(
+        None,
+        min_length=3,
+        max_length=50,
+        description="Filter by team name (case-insensitive partial match)",
+        examples=["Arsenal"],
+    )
+
+
+class DateRangeFilters(BaseModel):
+    from_date: Optional[date] = Field(
+        None,
+        description="Matches on or after this date (YYYY-MM-DD)",
+        examples=["2026-01-01"],
+    )
+    to_date: Optional[date] = Field(
+        None,
+        description="Matches on or before this date (YYYY-MM-DD)",
+        examples=["2026-12-31"],
+    )
+
+    @model_validator(mode='after')
+    def validate_date_range(self):
+        if self.from_date and self.to_date:
+            if self.from_date > self.to_date:
+                raise ValueError("from_date must be before or equal to to_date")
+        return self
+
+
+class PaginationParams(BaseModel):
+    page: int = Field(1, ge=1, description="Page number (1-indexed)")
+    limit: int = Field(20, ge=1, le=100, description="Items per page (max 100)")
+
+
+class DeleteResponse(BaseModel):
+    """Response model for successful deletion"""
+    message: str
+    deleted_id: int
+    deleted_match: Match
+
+
+INITIAL_DATA: List[Match] = [
+    Match(
+        id=1,
+        home_team="Arsenal",
+        away_team="Chelsea",
+        sport=Sport.football,
+        date=date(2025, 10, 21),
+        status=Status.completed,
+        winner=Winner.draw,
+        venue="Emirates Stadium",
+        score_home=2,
+        score_away=2,
+    ),
+    Match(
+        id=2,
+        home_team="Lakers",
+        away_team="Warriors",
+        sport=Sport.basketball,
+        date=date(2025, 11, 15),
+        status=Status.completed,
+        winner=Winner.home_team,
+        venue="Crypto.com Arena",
+        score_home=112,
+        score_away=98,
+    ),
+    Match(
+        id=3,
+        home_team="Real Madrid",
+        away_team="Barcelona",
+        sport=Sport.football,
+        date=date(2026, 4, 10),
+        status=Status.completed,
+        winner=Winner.draw,
+        venue="Santiago Bernabeu",
+        score_home=1,
+        score_away=1,
+    ),
+    Match(
+        id=4,
+        home_team="Knicks",
+        away_team="Celtics",
+        sport=Sport.basketball,
+        date=date(2026, 3, 5),
+        status=Status.upcoming,
+        winner=None,
+        venue="Madison Square Garden",
+    ),
+]
+
+
+@app.get("/health", tags=["System"])
+def health_check():
+    return {"status": "ok"}
+
+
+@app.get("/matches", tags=["Matches"])
+def list_matches(
+    filters: Annotated[MatchFilters, Query()],
+    date_range: Annotated[DateRangeFilters, Query()],
+    pagination: Annotated[PaginationParams, Query()],
+):
+    matches = list(INITIAL_DATA)
+
+    if filters.sport:
+        matches = [m for m in matches if m.sport == filters.sport]
+    if filters.status:
+        matches = [m for m in matches if m.status == filters.status]
+    if filters.winner:
+        matches = [m for m in matches if m.winner == filters.winner]
+    if filters.team:
+        team_lower = filters.team.lower()
+        matches = [
+            m
+            for m in matches
+            if team_lower in m.home_team.lower() or team_lower in m.away_team.lower()
+        ]
+
+    if date_range.from_date:
+        matches = [m for m in matches if m.date >= date_range.from_date]
+    if date_range.to_date:
+        matches = [m for m in matches if m.date <= date_range.to_date]
+
+    total = len(matches)
+    start = (pagination.page - 1) * pagination.limit
+    paginated = matches[start : start + pagination.limit]
+
+    return {
+        "total": total,
+        "page": pagination.page,
+        "limit": pagination.limit,
+        "results": paginated,
+    }
+
+
+@app.get("/matches/{match_id}", tags=["Matches"])
+def get_match_by_id(
+    match_id: Annotated[
+        int,
+        Path(
+            ge=1,
+            title="Match ID",
+            description="The unique identifier of the match (must be positive)",
+        ),
+    ],
+):
+    for match in INITIAL_DATA:
+        if match.id == match_id:
+            return match
+    return {"error": "Match not found"}, 404
+
+
+@app.post("/matches", tags=["Matches"], status_code=status.HTTP_201_CREATED)
+def create_match(
+    match: Annotated[
+        Match,
+        Body(
+            openapi_examples={
+                "basic": {
+                    "summary": "Basic upcoming match",
+                    "description": "Create a simple match with minimal required fields",
+                    "value": {
+                        "home_team": "Arsenal",
+                        "away_team": "Chelsea",
+                        "sport": "football",
+                        "date": "2026-03-15",
+                        "status": "upcoming",
+                        "venue": "Emirates Stadium",
+                    },
+                },
+            }
+        ),
+    ]
+):
+    """Create a new match with validation."""
+    if match.status == Status.upcoming and match.date < date.today():
+        return {"error": "Upcoming match date cannot be in the past."}, 400
+
+    match.id = INITIAL_DATA[-1].id + 1 if INITIAL_DATA else 1
+    INITIAL_DATA.append(match)
+    return match
+
+
+@app.put("/matches/{match_id}", tags=["Matches"])
+def replace_match(
+    match_id: Annotated[int, Path(ge=1, title="Match ID")],
+    match: Match,
+):
+    """Replace an entire match with new data (PUT)."""
+    for i, existing_match in enumerate(INITIAL_DATA):
+        if existing_match.id == match_id:
+            match.id = match_id
+            INITIAL_DATA[i] = match
+            return match
+    
+    return {"error": "Match not found"}, 404
+
+
+@app.patch("/matches/{match_id}", tags=["Matches"])
+def update_match(
+    match_id: Annotated[int, Path(ge=1, title="Match ID")],
+    update: MatchUpdate,
+):
+    """Partially update a match with validation of the final state."""
+    for match in INITIAL_DATA:
+        if match.id == match_id:
+            update_data = update.model_dump(exclude_unset=True)
+            
+            for field, value in update_data.items():
+                setattr(match, field, value)
+            
+            try:
+                Match.model_validate(match)
+            except ValueError as e:
+                return {"error": f"Update would create invalid match: {str(e)}"}, 400
+            
+            return match
+    
+    return {"error": "Match not found"}, 404
+
+
+@app.delete("/matches/{match_id}", tags=["Matches"], status_code=status.HTTP_200_OK)
+def delete_match(
+    match_id: Annotated[
+        int,
+        Path(
+            ge=1,
+            title="Match ID",
+            description="ID of the match to delete",
+        ),
+    ],
+):
+    """
+    Delete a match by ID.
+    
+    Returns the deleted match data for confirmation.
+    Once deleted, the match cannot be recovered (in this implementation).
+    """
+    for i, match in enumerate(INITIAL_DATA):
+        if match.id == match_id:
+            deleted_match = INITIAL_DATA.pop(i)
+            return DeleteResponse(
+                message="Match deleted successfully",
+                deleted_id=match_id,
+                deleted_match=deleted_match,
+            )
+    
+    return {"error": "Match not found"}, 404
+
+
+@app.delete("/matches", tags=["Matches"], status_code=status.HTTP_200_OK)
+def delete_matches_by_criteria(
+    filters: Annotated[MatchFilters, Query()],
+):
+    """
+    Delete multiple matches matching filter criteria.
+    
+    ⚠️ Warning: This permanently deletes all matches matching the filters.
+    Be careful with broad filters that might delete more than intended.
+    
+    Returns count of deleted matches and their IDs.
+    """
+    global INITIAL_DATA
+    
+    matches_to_keep = []
+    deleted_matches = []
+    
+    for match in INITIAL_DATA:
+        should_delete = True
+        
+        # Check each filter
+        if filters.sport and match.sport != filters.sport:
+            should_delete = False
+        if filters.status and match.status != filters.status:
+            should_delete = False
+        if filters.winner and match.winner != filters.winner:
+            should_delete = False
+        if filters.team:
+            team_lower = filters.team.lower()
+            if (team_lower not in match.home_team.lower() and 
+                team_lower not in match.away_team.lower()):
+                should_delete = False
+        
+        if should_delete:
+            deleted_matches.append(match)
+        else:
+            matches_to_keep.append(match)
+    
+    # Prevent accidental deletion of all matches
+    if not any([filters.sport, filters.status, filters.winner, filters.team]):
+        return {
+            "error": "Cannot delete all matches without filters. "
+                     "Provide at least one filter criterion."
+        }, 400
+    
+    INITIAL_DATA = matches_to_keep
+    
+    return {
+        "message": f"Deleted {len(deleted_matches)} match(es)",
+        "deleted_count": len(deleted_matches),
+        "deleted_ids": [m.id for m in deleted_matches],
+    }
+`;
+
+# Deleting Resources (DELETE)
+
+You've mastered creating (POST), reading (GET), and updating (PUT/PATCH) resources. The final piece of CRUD is **DELETE** — removing resources from your system. In this lesson, you'll learn how to implement safe deletion endpoints with proper validation, error handling, and important production considerations.
+
+---
+
+## Where We Are
+
+Your API now supports the CRU in CRUD:
+- **Create:** `POST /matches` — Add new matches
+- **Read:** `GET /matches` and `GET /matches/{id}` — Retrieve matches
+- **Update:** `PUT /matches/{id}` and `PATCH /matches/{id}` — Modify matches
+
+The final operation is **Delete** — removing matches that shouldn't exist anymore.
+
+---
+
+## Step 1 — Basic DELETE Endpoint
+
+Start with the simplest form: delete a single resource by ID.
+
+```python title="matches.py"
+@app.delete("/matches/{match_id}", tags=["Matches"])
+def delete_match(
+    match_id: Annotated[
+        int,
+        Path(
+            ge=1,
+            title="Match ID",
+            description="ID of the match to delete",
+        ),
+    ],
+):
+    """
+    Delete a match by ID.
+    
+    Returns the deleted match data for confirmation.
+    """
+    for i, match in enumerate(INITIAL_DATA):
+        if match.id == match_id:
+            deleted_match = INITIAL_DATA.pop(i)
+            return {
+                "message": "Match deleted successfully",
+                "deleted_id": match_id,
+                "deleted_match": deleted_match,
+            }
+    
+    return {"error": "Match not found"}, 404
+```
+
+Breaking this down:
+- `@app.delete()` — Defines a DELETE endpoint
+- `INITIAL_DATA.pop(i)` — Removes the match from the list and returns it
+- We return the deleted match so the user can verify what was deleted
+- 404 if the match doesn't exist
+
+Test it:
+```bash
+DELETE /matches/1
+```
+
+Response:
+```json
+{
+  "message": "Match deleted successfully",
+  "deleted_id": 1,
+  "deleted_match": {
+    "id": 1,
+    "home_team": "Arsenal",
+    "away_team": "Chelsea",
+    "sport": "football",
+    "date": "2025-10-21",
+    "status": "completed",
+    "venue": "Emirates Stadium",
+    "score_home": 2,
+    "score_away": 2,
+    "winner": "draw"
+  }
+}
+```
+
+<Callout type="info" title="Why Return the Deleted Resource?">
+Returning the deleted resource serves two purposes:
+1. **Confirmation** — User can verify they deleted the right thing
+2. **Undo capability** — Client can keep the data to potentially restore it
+
+Some APIs return just `{"message": "deleted"}` or even an empty response with `204 No Content`. Both approaches are valid.
+</Callout>
+
+---
+
+## Step 2 — Use Proper Status Codes
+
+HTTP status codes communicate what happened. Import the status module:
+
+```diff title="matches.py"
+- from fastapi import Body, FastAPI, Path, Query
++ from fastapi import Body, FastAPI, Path, Query, status
+```
+
+Then use it for your DELETE endpoint:
+
+```python title="matches.py"
+@app.delete(
+    "/matches/{match_id}",
+    tags=["Matches"],
+    status_code=status.HTTP_200_OK,  # !mark
+)
+def delete_match(
+    match_id: Annotated[int, Path(ge=1)],
+):
+    # ... same implementation ...
+```
+
+Common status codes for DELETE:
+- **200 OK** — Deleted successfully, returning the deleted resource
+- **204 No Content** — Deleted successfully, not returning anything
+- **404 Not Found** — Resource doesn't exist
+- **409 Conflict** — Can't delete due to dependencies (covered later)
+
+<Callout type="info" title="200 vs 204 for DELETE">
+- **Use 200** when returning the deleted resource or a confirmation message
+- **Use 204** when returning no body at all (literally empty response)
+
+This tutorial uses 200 because we return the deleted match. Both are correct.
+</Callout>
+
+---
+
+## Step 3 — Create a Typed Response Model
+
+Instead of returning a plain dict, create a Pydantic model for the response:
+
+```python title="matches.py - add before endpoints"
+class DeleteResponse(BaseModel):
+    """Response model for successful deletion"""
+    message: str
+    deleted_id: int
+    deleted_match: Match
+```
+
+Update the endpoint:
+
+```python title="matches.py"
+@app.delete("/matches/{match_id}", tags=["Matches"])
+def delete_match(
+    match_id: Annotated[int, Path(ge=1)],
+):
+    """Delete a match by ID."""
+    for i, match in enumerate(INITIAL_DATA):
+        if match.id == match_id:
+            deleted_match = INITIAL_DATA.pop(i)
+            return DeleteResponse(  # !mark
+                message="Match deleted successfully",  # !mark
+                deleted_id=match_id,  # !mark
+                deleted_match=deleted_match,  # !mark
+            )  # !mark
+    
+    return {"error": "Match not found"}, 404
+```
+
+Why use a model?
+- Type checking — FastAPI validates the response
+- Documentation — Auto-generated docs show the exact response structure
+- Consistency — All successful deletes have the same format
+
+---
+
+## Step 4 — Add Safety Checks (Optional Validation)
+
+Sometimes you want to prevent deletion based on business rules. For example, maybe you can't delete completed matches:
+
+```python title="matches.py - adding business logic"
+@app.delete("/matches/{match_id}", tags=["Matches"])
+def delete_match(
+    match_id: Annotated[int, Path(ge=1)],
+):
+    """Delete a match by ID."""
+    for i, match in enumerate(INITIAL_DATA):
+        if match.id == match_id:
+            # Business rule: Can't delete completed matches  # !mark
+            if match.status == Status.completed:  # !mark
+                return {  # !mark
+                    "error": "Cannot delete completed matches",  # !mark
+                    "reason": "Historical data must be preserved",  # !mark
+                }, 409  # Conflict  # !mark
+            
+            deleted_match = INITIAL_DATA.pop(i)
+            return DeleteResponse(
+                message="Match deleted successfully",
+                deleted_id=match_id,
+                deleted_match=deleted_match,
+            )
+    
+    return {"error": "Match not found"}, 404
+```
+
+The `409 Conflict` status code indicates the request is valid but can't be completed due to the resource's current state.
+
+<Callout type="warn" title="Business Rules in DELETE">
+Consider carefully what can and can't be deleted:
+- Historical records (completed matches, finalized orders)?
+- Resources referenced by other data?
+- Resources tied to payments or legal obligations?
+
+Some systems use "soft deletes" (marking as deleted without removing) for these cases.
+</Callout>
+
+---
+
+## Step 5 — Bulk Delete with Filters
+
+Sometimes you need to delete multiple resources at once. Add a second DELETE endpoint that uses filters:
+
+```python title="matches.py"
+@app.delete("/matches", tags=["Matches"], status_code=status.HTTP_200_OK)
+def delete_matches_by_criteria(
+    filters: Annotated[MatchFilters, Query()],
+):
+    """
+    Delete multiple matches matching filter criteria.
+    
+    ⚠️ Warning: This permanently deletes all matches matching the filters.
+    Be careful with broad filters that might delete more than intended.
+    
+    Returns count of deleted matches and their IDs.
+    """
+    global INITIAL_DATA
+    
+    matches_to_keep = []
+    deleted_matches = []
+    
+    for match in INITIAL_DATA:
+        should_delete = True
+        
+        # Check each filter
+        if filters.sport and match.sport != filters.sport:
+            should_delete = False
+        if filters.status and match.status != filters.status:
+            should_delete = False
+        if filters.winner and match.winner != filters.winner:
+            should_delete = False
+        if filters.team:
+            team_lower = filters.team.lower()
+            if (team_lower not in match.home_team.lower() and 
+                team_lower not in match.away_team.lower()):
+                should_delete = False
+        
+        if should_delete:
+            deleted_matches.append(match)
+        else:
+            matches_to_keep.append(match)
+    
+    # Prevent accidental deletion of all matches  # !mark
+    if not any([filters.sport, filters.status, filters.winner, filters.team]):  # !mark
+        return {  # !mark
+            "error": "Cannot delete all matches without filters. "  # !mark
+                     "Provide at least one filter criterion."  # !mark
+        }, 400  # !mark
+    
+    INITIAL_DATA = matches_to_keep
+    
+    return {
+        "message": f"Deleted {len(deleted_matches)} match(es)",
+        "deleted_count": len(deleted_matches),
+        "deleted_ids": [m.id for m in deleted_matches],
+    }
+```
+
+This endpoint:
+- Uses the same `MatchFilters` model as the GET endpoint
+- Prevents accidental deletion of everything (requires at least one filter)
+- Returns how many matches were deleted
+
+Test it:
+```bash
+DELETE /matches?status=cancelled
+```
+
+Response:
+```json
+{
+  "message": "Deleted 2 match(es)",
+  "deleted_count": 2,
+  "deleted_ids": [5, 7]
+}
+```
+
+<Callout type="warn" title="Bulk Delete Dangers">
+Bulk delete is powerful but dangerous:
+- A typo in filters can delete the wrong data
+- Missing filters can wipe out everything
+- No easy undo unless you have backups
+
+Consider requiring additional confirmation (like a query parameter `?confirm=true`) or only allowing bulk delete for specific statuses (like "draft" or "cancelled").
+</Callout>
+
+---
+
+## DELETE Best Practices
+
+### 1. **Idempotency**
+
+DELETE should be idempotent — calling it multiple times has the same effect as calling it once:
+
+```python
+DELETE /matches/1  →  200 OK (deleted)
+DELETE /matches/1  →  404 Not Found (already deleted)
+DELETE /matches/1  →  404 Not Found (still doesn't exist)
+```
+
+Your implementation handles this correctly — deleting a non-existent resource returns 404, not an error.
+
+### 2. **Soft Delete vs Hard Delete**
+
+**Hard Delete** (what we've implemented):
+```python
+INITIAL_DATA.pop(i)  # Actually removes from data
+```
+
+**Soft Delete** (mark as deleted):
+```python
+match.deleted = True  # Still in data, just marked
+match.deleted_at = datetime.now()
+```
+
+Use soft delete when:
+- You need audit trails
+- Data might need restoration
+- Other resources reference this one
+- Legal/compliance requires retention
+
+Use hard delete when:
+- Data is truly temporary (sessions, caches)
+- Privacy regulations require actual deletion (GDPR "right to be forgotten")
+- You're confident it should never come back
+
+### 3. **Cascading Deletes**
+
+What happens when you delete a match that has:
+- Events (goals, cards)?
+- Statistics?
+- References from other tables?
+
+Options:
+```python
+# Option 1: Prevent delete if dependencies exist
+if match.events or match.statistics:
+    return {"error": "Cannot delete match with events/stats"}, 409
+
+# Option 2: Delete dependencies too (cascade)
+match.events.clear()
+match.statistics = None
+INITIAL_DATA.pop(i)
+
+# Option 3: Set dependencies to null
+for event in all_events:
+    if event.match_id == match_id:
+        event.match_id = None
+```
+
+This tutorial doesn't enforce cascading rules because we're using an in-memory list. In a real database, you'd configure this at the schema level.
+
+### 4. **Confirmation for Critical Deletes**
+
+For important resources, require explicit confirmation:
+
+```python
+@app.delete("/matches/{match_id}")
+def delete_match(
+    match_id: Annotated[int, Path(ge=1)],
+    confirm: Annotated[bool, Query()] = False,  # !mark
+):
+    """Delete a match. Requires confirm=true query parameter."""
+    if not confirm:  # !mark
+        return {  # !mark
+            "error": "Deletion requires confirmation",  # !mark
+            "hint": "Add ?confirm=true to delete"  # !mark
+        }, 400  # !mark
+    
+    # ... proceed with deletion ...
+```
+
+Now users must explicitly call:
+```bash
+DELETE /matches/1?confirm=true
+```
+
+---
+
+## Production Considerations
+
+### 1. **Authorization**
+
+In production, check permissions before deleting:
+
+```python
+@app.delete("/matches/{match_id}")
+def delete_match(
+    match_id: int,
+    current_user: User = Depends(get_current_user),  # From auth system
+):
+    # Check if user can delete this match
+    if not current_user.can_delete_matches:
+        return {"error": "Insufficient permissions"}, 403
+    
+    # Proceed with deletion...
+```
+
+### 2. **Audit Logging**
+
+Log all deletions for accountability:
+
+```python
+@app.delete("/matches/{match_id}")
+def delete_match(match_id: int):
+    match = find_match(match_id)
+    if match:
+        # Log before deleting
+        audit_log.info(
+            "match_deleted",
+            match_id=match_id,
+            deleted_by=current_user.id,
+            deleted_at=datetime.now(),
+            match_data=match.model_dump(),
+        )
+        
+        delete(match)
+```
+
+### 3. **Background Deletion**
+
+For large deletes, use background tasks:
+
+```python
+from fastapi import BackgroundTasks
+
+@app.delete("/matches")
+def delete_matches(
+    filters: MatchFilters,
+    background_tasks: BackgroundTasks,
+):
+    # Queue the deletion instead of doing it immediately
+    background_tasks.add_task(delete_matches_task, filters)
+    
+    return {"message": "Deletion queued", "status": "processing"}
+```
+
+### 4. **Rate Limiting**
+
+Prevent abuse by limiting deletion frequency:
+
+```python
+@limiter.limit("10/minute")  # Max 10 deletes per minute
+@app.delete("/matches/{match_id}")
+def delete_match(match_id: int):
+    # ... deletion logic ...
+```
+
+---
+
+## Complete CRUD Summary
+
+You now have a complete CRUD API:
+
+```python title="Full CRUD operations"
+# Create
+POST /matches                  # Create new match
+└─ Status: 201 Created
+
+# Read
+GET /matches                   # List all matches (with filters)
+GET /matches/{id}              # Get single match
+└─ Status: 200 OK or 404 Not Found
+
+# Update
+PUT /matches/{id}              # Replace entire match
+PATCH /matches/{id}            # Update specific fields
+└─ Status: 200 OK or 404 Not Found
+
+# Delete
+DELETE /matches/{id}           # Delete single match
+DELETE /matches?filters        # Delete multiple matches
+└─ Status: 200 OK or 404 Not Found
+```
+
+Every operation has:
+- ✅ Proper HTTP methods and status codes
+- ✅ Input validation with Pydantic models
+- ✅ Clear error messages
+- ✅ Typed responses
+- ✅ API documentation
+
+---
+
+## What You've Learned
+
+```python title="DELETE patterns"
+# Single resource deletion
+@app.delete("/resource/{id}")
+def delete_resource(id: int) -> DeleteResponse:
+    resource = find(id)
+    if not resource:
+        return {"error": "Not found"}, 404
+    
+    # Optional: Business logic validation
+    if resource.status == "protected":
+        return {"error": "Cannot delete"}, 409
+    
+    delete(resource)
+    return DeleteResponse(...)
+
+# Bulk deletion with filters
+@app.delete("/resource")
+def delete_many(filters: Filters) -> DeleteSummary:
+    # Require at least one filter
+    if no_filters_provided(filters):
+        return {"error": "Need filters"}, 400
+    
+    deleted = delete_matching(filters)
+    return {"deleted_count": len(deleted)}
+```
+
+Key concepts:
+- DELETE removes resources (obviously!)
+- Return deleted data for confirmation
+- Use 404 for not found, 409 for conflicts
+- Prevent accidental bulk deletes
+- Consider soft delete for important data
+- Add authorization, logging, and rate limiting in production
+
+---
+
+## What's Next
+
+You've completed the core CRUD operations! Your API can now create, read, update, and delete resources with comprehensive validation at every step.
+
+In the next module, you'll learn about database integration — moving from in-memory storage to persistent PostgreSQL storage with SQLAlchemy, proper relationships, and migrations.
+
+<CopyFinalCode code={_fc} />

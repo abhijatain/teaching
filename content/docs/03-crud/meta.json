@@ -1,0 +1,5 @@
+{
+  "title": "CRUD",
+  "description": "Learn FastAPI by building a sports matches API from scratch, starting with strings and progressively adding type safety, validation, and filters.",
+  "pages": ["01-update", "02-delete"]
+}
