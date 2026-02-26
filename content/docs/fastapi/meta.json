@@ -8,8 +8,11 @@
     "04-advanced-filtering",
     "05-post-validation",
     "06-review",
-    "07-query-validation",
-    "08-path-validation",
-    "09-query-parameter-model"
+    "07-pagination-soritng",
+    "08-query-validation",
+    "09-path-validation",
+    "10-query-parameter-model",
+    "11-body-field-validation",
+    "12-nested-models"
   ]
 }

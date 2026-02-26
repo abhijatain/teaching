@@ -1,0 +1,846 @@
+---
+title: Pagination and Sorting
+description: Add pagination and sorting to handle large result sets efficiently.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+# Pagination and Sorting
+
+Our filtering works great, but what happens when `/matches` returns 10,000 results? We need pagination and sorting.
+
+## The Problem: Returning Everything
+
+Right now, our endpoint returns **all matching results**:
+
+```python title="matches.py - Current implementation"
+@app.get("/matches", tags=["Matches"])
+def list_matches(
+    status: Optional[Status] = None,
+    sport: Optional[Sport] = None,
+    # ... other filters ...
+):
+    matches = INITIAL_DATA
+    
+    # Apply filters...
+    if status:
+        matches = [m for m in matches if m.status == status]
+    
+    return matches  # !mark (returns everything)
+```
+
+Try querying a popular sport:
+
+```bash
+curl "http://localhost:8000/matches?sport=football"
+```
+
+If you have 5,000 football matches, the response would be:
+- **Huge** (megabytes of JSON)
+- **Slow** (takes seconds to serialize and transfer)
+- **Overwhelming** (user only needs to see 20 at a time)
+
+<Callout type="warn" title="Performance and UX Problem">
+  Without pagination:
+  - Server wastes CPU serializing thousands of matches
+  - Network wastes bandwidth transferring unused data
+  - Client wastes memory storing data they never view
+  - Users wait longer for a response they don't fully need
+  
+  Most list endpoints should **always** paginate.
+</Callout>
+
+---
+
+## Solution 1: Basic Pagination
+
+Add two query parameters: `page` and `limit`:
+
+```python title="matches.py"
+from typing import Annotated
+from fastapi import Query
+
+
+@app.get("/matches", tags=["Matches"])
+def list_matches(
+    status: Optional[Status] = None,
+    sport: Optional[Sport] = None,
+    winner: Optional[Winner] = None,
+    match_date: Optional[date] = None,
+    date_filter: Optional[DateFilter] = None,
+    team_name: Optional[str] = None,
+    team_filter: Optional[TeamFilter] = None,
+    page: Annotated[int, Query(ge=1)] = 1,  # !mark
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,  # !mark
+):
+    # Validate filter combinations...
+    if team_filter and winner:
+        return {"error": "team_filter and winner cannot be used together"}
+    
+    # Apply filters...
+    matches = INITIAL_DATA
+    
+    if status:
+        matches = [m for m in matches if m.status == status]
+    
+    if sport:
+        matches = [m for m in matches if m.sport == sport]
+    
+    # ... other filters ...
+    
+    # Apply pagination
+    total = len(matches)  # !mark
+    start = (page - 1) * limit  # !mark
+    end = start + limit  # !mark
+    paginated = matches[start:end]  # !mark
+    
+    return {  # !mark
+        "total": total,  # !mark
+        "page": page,  # !mark
+        "limit": limit,  # !mark
+        "results": paginated,  # !mark
+    }  # !mark
+```
+
+<Callout type="info" title="Pagination Math">
+  ```python
+  # User requests page 2 with 20 items per page:
+  page = 2
+  limit = 20
+  
+  start = (2 - 1) * 20 = 20    # Skip first 20 items
+  end = 20 + 20 = 40           # Take next 20 items
+  
+  matches[20:40]               # Items 20-39 (zero-indexed)
+  ```
+  
+  Page numbering is **1-indexed** (page 1 is first page) but Python slicing is **0-indexed** (index 0 is first item).
+</Callout>
+
+---
+
+## Using Pagination
+
+Try different pages:
+
+```bash title="First page (default)"
+curl "http://localhost:8000/matches?sport=football"
+```
+
+Response:
+
+```json
+{
+  "total": 3,
+  "page": 1,
+  "limit": 20,
+  "results": [
+    { "id": 1, "home_team": "Arsenal", ... },
+    { "id": 3, "home_team": "Real Madrid", ... },
+    { "id": 8, "home_team": "Bayern Munich", ... }
+  ]
+}
+```
+
+```bash title="Second page"
+curl "http://localhost:8000/matches?sport=football&page=2&limit=2"
+```
+
+Response:
+
+```json
+{
+  "total": 3,
+  "page": 2,
+  "limit": 2,
+  "results": [
+    { "id": 8, "home_team": "Bayern Munich", ... }
+  ]
+}
+```
+
+<Callout type="info" title="Pagination Response Structure">
+  The response includes:
+  - `total` — total matches found (across all pages)
+  - `page` — current page number
+  - `limit` — items per page
+  - `results` — the actual data for this page
+  
+  This lets clients build "Page 2 of 5" UI elements.
+</Callout>
+
+---
+
+## Validating Pagination Parameters
+
+Notice the validation on `page` and `limit`:
+
+```python title="Pagination constraints"
+page: Annotated[int, Query(ge=1)] = 1
+      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      Must be ≥ 1 (no page 0, no negative pages)
+
+limit: Annotated[int, Query(ge=1, le=100)] = 20
+       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+       Between 1 and 100 (prevent abuse)
+```
+
+Try invalid values:
+
+```bash title="❌ Page 0"
+curl "http://localhost:8000/matches?page=0"
+```
+
+Error: "ensure this value is greater than or equal to 1"
+
+```bash title="❌ Limit 500"
+curl "http://localhost:8000/matches?limit=500"
+```
+
+Error: "ensure this value is less than or equal to 100"
+
+<Callout type="warn" title="Why Cap the Limit?">
+  Without `le=100`, users could request:
+  ```
+  /matches?limit=999999999
+  ```
+  
+  This could:
+  - Exhaust server memory
+  - Cause database timeouts
+  - Enable denial-of-service attacks
+  
+  Always cap pagination size to something reasonable (10-100 items).
+</Callout>
+
+---
+
+## Handling Empty Pages
+
+What if the user requests page 50 but there are only 2 pages of results?
+
+```bash
+curl "http://localhost:8000/matches?sport=football&page=50"
+```
+
+Current behavior: returns empty `results` array with `total: 3`.
+
+This is fine, but we can be more helpful:
+
+```python title="matches.py"
+@app.get("/matches", tags=["Matches"])
+def list_matches(
+    # ... parameters ...
+):
+    # Apply filters...
+    matches = INITIAL_DATA
+    # ... filtering logic ...
+    
+    # Calculate pagination
+    total = len(matches)
+    total_pages = (total + limit - 1) // limit  # !mark (ceiling division)
+    
+    # Validate page number
+    if page > total_pages and total > 0:  # !mark
+        return {  # !mark
+            "error": f"Page {page} does not exist. Total pages: {total_pages}",  # !mark
+            "total": total,  # !mark
+            "total_pages": total_pages,  # !mark
+        }  # !mark
+    
+    # Apply pagination
+    start = (page - 1) * limit
+    end = start + limit
+    paginated = matches[start:end]
+    
+    return {
+        "total": total,
+        "page": page,
+        "limit": limit,
+        "total_pages": total_pages,  # !mark
+        "results": paginated,
+    }
+```
+
+<Callout type="info" title="Ceiling Division Trick">
+  ```python
+  # How many pages for 7 items with 3 per page?
+  total_pages = (7 + 3 - 1) // 3
+              = 9 // 3
+              = 3 pages
+  
+  # Math: ⌈7 / 3⌉ = ⌈2.33⌉ = 3
+  # Formula: (total + limit - 1) // limit
+  ```
+  
+  This rounds up without using `math.ceil()`.
+</Callout>
+
+---
+
+## Adding Sorting
+
+Now let's add sorting. Users should be able to sort by date, sport, status, or team name:
+
+```python title="matches.py"
+from typing import Annotated, Literal
+
+
+@app.get("/matches", tags=["Matches"])
+def list_matches(
+    status: Optional[Status] = None,
+    sport: Optional[Sport] = None,
+    winner: Optional[Winner] = None,
+    match_date: Optional[date] = None,
+    date_filter: Optional[DateFilter] = None,
+    team_name: Optional[str] = None,
+    team_filter: Optional[TeamFilter] = None,
+    page: Annotated[int, Query(ge=1)] = 1,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    sort_by: Annotated[  # !mark
+        Optional[Literal["date", "sport", "status", "home_team"]],  # !mark
+        Query(description="Field to sort by"),  # !mark
+    ] = None,  # !mark
+    sort_order: Annotated[  # !mark
+        Literal["asc", "desc"],  # !mark
+        Query(description="Sort order: ascending or descending"),  # !mark
+    ] = "asc",  # !mark
+):
+    # Apply filters...
+    matches = INITIAL_DATA
+    
+    if status:
+        matches = [m for m in matches if m.status == status]
+    
+    # ... other filters ...
+    
+    # Apply sorting
+    if sort_by:  # !mark
+        reverse = (sort_order == "desc")  # !mark
+        matches = sorted(matches, key=lambda m: getattr(m, sort_by), reverse=reverse)  # !mark
+    
+    # Apply pagination
+    total = len(matches)
+    total_pages = (total + limit - 1) // limit
+    start = (page - 1) * limit
+    end = start + limit
+    paginated = matches[start:end]
+    
+    return {
+        "total": total,
+        "page": page,
+        "limit": limit,
+        "total_pages": total_pages,
+        "results": paginated,
+    }
+```
+
+<Callout type="info" title="Understanding the Sort">
+  ```python
+  matches = sorted(matches, key=lambda m: getattr(m, sort_by), reverse=reverse)
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^
+                           Extract the field to sort by         Reverse if desc
+  
+  # getattr(m, "date") returns m.date
+  # getattr(m, "sport") returns m.sport
+  # etc.
+  ```
+  
+  `getattr()` dynamically accesses attributes by name (string).
+</Callout>
+
+---
+
+## Using Sorting
+
+```bash title="Sort by date (oldest first)"
+curl "http://localhost:8000/matches?sort_by=date&sort_order=asc"
+```
+
+```bash title="Sort by date (newest first)"
+curl "http://localhost:8000/matches?sort_by=date&sort_order=desc"
+```
+
+```bash title="Sort by team name"
+curl "http://localhost:8000/matches?sort_by=home_team"
+```
+
+```bash title="Combine: filter + sort + paginate"
+curl "http://localhost:8000/matches?sport=football&sort_by=date&sort_order=desc&page=1&limit=5"
+```
+
+Response: First 5 football matches, sorted by date (newest first).
+
+<Callout type="info" title="Order of Operations">
+  The order matters:
+  1. **Filter** — narrow down results
+  2. **Sort** — order the filtered results
+  3. **Paginate** — take a slice of the sorted results
+  
+  Never paginate before filtering/sorting, or you'll get inconsistent results.
+</Callout>
+
+---
+
+## Sorting by Enum Values
+
+Notice we can sort by `sport` and `status` (which are enums). How does that work?
+
+```python title="Enum sorting"
+# Enums sort alphabetically by their string value
+Status.upcoming    # "upcoming"
+Status.completed   # "completed"
+Status.cancelled   # "cancelled"
+
+# Sorted order: abandoned, cancelled, completed, upcoming
+```
+
+If you want a custom sort order for enums, you'd need to map them:
+
+```python title="Custom enum sort order"
+STATUS_ORDER = {
+    Status.upcoming: 1,
+    Status.completed: 2,
+    Status.cancelled: 3,
+    Status.abandoned: 4,
+}
+
+# Then sort by:
+matches = sorted(matches, key=lambda m: STATUS_ORDER[m.status])
+```
+
+But for most cases, alphabetical sorting is fine.
+
+---
+
+## Complete Paginated and Sorted Endpoint
+
+Here's the full implementation:
+
+```python title="matches.py"
+@app.get("/matches", tags=["Matches"])
+def list_matches(
+    # Filters
+    status: Optional[Status] = None,
+    sport: Optional[Sport] = None,
+    winner: Optional[Winner] = None,
+    match_date: Optional[date] = None,
+    date_filter: Optional[DateFilter] = None,
+    team_name: Optional[str] = None,
+    team_filter: Optional[TeamFilter] = None,
+    # Pagination
+    page: Annotated[int, Query(ge=1, description="Page number (1-indexed)")] = 1,
+    limit: Annotated[int, Query(ge=1, le=100, description="Items per page")] = 20,
+    # Sorting
+    sort_by: Annotated[
+        Optional[Literal["date", "sport", "status", "home_team"]],
+        Query(description="Field to sort by"),
+    ] = None,
+    sort_order: Annotated[
+        Literal["asc", "desc"],
+        Query(description="Sort order"),
+    ] = "asc",
+):
+    """
+    List matches with filtering, sorting, and pagination.
+    
+    - Filters narrow down results
+    - Sorting orders results
+    - Pagination splits results into pages
+    """
+    # ── Validate filter combinations ─────────────────
+    if team_filter and winner:
+        return {"error": "team_filter and winner cannot be used together"}
+    
+    if (team_filter or winner) and status and status != Status.completed:
+        return {"error": "team_filter or winner can only be used when status=completed"}
+    
+    # ── Apply filters ────────────────────────────────
+    matches = INITIAL_DATA
+    
+    if status:
+        matches = [m for m in matches if m.status == status]
+    
+    if sport:
+        matches = [m for m in matches if m.sport == sport]
+    
+    if winner:
+        matches = [m for m in matches if m.winner == winner]
+    
+    if match_date:
+        if date_filter == DateFilter.gt:
+            matches = [m for m in matches if m.date > match_date]
+        elif date_filter == DateFilter.lt:
+            matches = [m for m in matches if m.date < match_date]
+        else:
+            matches = [m for m in matches if m.date == match_date]
+    
+    if team_name:
+        team = team_name.lower()
+        
+        if team_filter is None:
+            matches = [
+                m for m in matches
+                if team in m.home_team.lower() or team in m.away_team.lower()
+            ]
+        elif team_filter == TeamFilter.won:
+            matches = [
+                m for m in matches
+                if (team == m.home_team.lower() and m.winner == Winner.home_team)
+                or (team == m.away_team.lower() and m.winner == Winner.away_team)
+            ]
+        elif team_filter == TeamFilter.lost:
+            matches = [
+                m for m in matches
+                if (team == m.home_team.lower() and m.winner == Winner.away_team)
+                or (team == m.away_team.lower() and m.winner == Winner.home_team)
+            ]
+        elif team_filter == TeamFilter.draw:
+            matches = [
+                m for m in matches
+                if (team in m.home_team.lower() or team in m.away_team.lower())
+                and m.winner == Winner.draw
+            ]
+    
+    # ── Apply sorting ────────────────────────────────
+    if sort_by:
+        reverse = (sort_order == "desc")
+        matches = sorted(matches, key=lambda m: getattr(m, sort_by), reverse=reverse)
+    
+    # ── Calculate pagination ─────────────────────────
+    total = len(matches)
+    total_pages = (total + limit - 1) // limit if total > 0 else 0
+    
+    # Validate page number
+    if page > total_pages and total > 0:
+        return {
+            "error": f"Page {page} does not exist. Total pages: {total_pages}",
+            "total": total,
+            "total_pages": total_pages,
+        }
+    
+    # ── Apply pagination ─────────────────────────────
+    start = (page - 1) * limit
+    end = start + limit
+    paginated = matches[start:end]
+    
+    # ── Return response ──────────────────────────────
+    if not matches:
+        return {
+            "message": "No matches found for the given filters",
+            "total": 0,
+            "page": page,
+            "limit": limit,
+            "total_pages": 0,
+            "results": [],
+        }
+    
+    return {
+        "total": total,
+        "page": page,
+        "limit": limit,
+        "total_pages": total_pages,
+        "results": paginated,
+    }
+```
+
+---
+
+## Response Format Consistency
+
+Notice the response **always** has the same structure:
+
+```json title="Success with results"
+{
+  "total": 50,
+  "page": 2,
+  "limit": 20,
+  "total_pages": 3,
+  "results": [ ... ]
+}
+```
+
+```json title="Empty results (valid query)"
+{
+  "message": "No matches found for the given filters",
+  "total": 0,
+  "page": 1,
+  "limit": 20,
+  "total_pages": 0,
+  "results": []
+}
+```
+
+```json title="Invalid query"
+{
+  "error": "team_filter and winner cannot be used together"
+}
+```
+
+<Callout type="info" title="Consistent Structure">
+  Clients can always expect:
+  - `total`, `page`, `limit`, `total_pages`, `results` for valid queries
+  - `error` for invalid queries
+  
+  Consistency makes client code simpler — no special cases.
+</Callout>
+
+---
+
+## Cursor-Based Pagination (Advanced)
+
+Offset pagination (`page` and `limit`) works well for small-medium datasets but has issues:
+
+1. **Inconsistent results** — if data changes between requests, page 2 might show duplicates or skip items
+2. **Inefficient for large datasets** — `OFFSET 1000000` in SQL is slow
+
+**Cursor-based pagination** solves this:
+
+```python title="matches.py - Cursor pagination (advanced)"
+@app.get("/matches/cursor", tags=["Matches"])
+def list_matches_cursor(
+    cursor: Optional[int] = None,  # Last seen match ID
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+):
+    """
+    Cursor-based pagination using match ID.
+    """
+    matches = INITIAL_DATA
+    
+    # Start from cursor if provided
+    if cursor:
+        matches = [m for m in matches if m.id > cursor]
+    
+    # Take only limit items
+    results = matches[:limit]
+    
+    # Next cursor is the last item's ID (if any)
+    next_cursor = results[-1].id if results else None
+    
+    return {
+        "results": results,
+        "next_cursor": next_cursor,
+        "has_more": len(matches) > limit,
+    }
+```
+
+Usage:
+
+```bash title="First request"
+curl "http://localhost:8000/matches/cursor?limit=2"
+```
+
+Response:
+
+```json
+{
+  "results": [ { "id": 1, ... }, { "id": 2, ... } ],
+  "next_cursor": 2,
+  "has_more": true
+}
+```
+
+```bash title="Next page"
+curl "http://localhost:8000/matches/cursor?cursor=2&limit=2"
+```
+
+Response:
+
+```json
+{
+  "results": [ { "id": 3, ... }, { "id": 4, ... } ],
+  "next_cursor": 4,
+  "has_more": true
+}
+```
+
+<Callout type="info" title="When to Use Cursor Pagination">
+  Use cursor pagination when:
+  - Dataset is very large (millions of rows)
+  - Data changes frequently (real-time feeds)
+  - Users scroll infinitely (social media feeds)
+  
+  Use offset pagination when:
+  - Dataset is small-medium (<10k items)
+  - Users need to jump to arbitrary pages
+  - You need page numbers in the UI
+</Callout>
+
+---
+
+## Performance Considerations
+
+### 1. Filter Before Sort
+
+Always filter before sorting:
+
+```python title="✅ Efficient"
+matches = INITIAL_DATA
+matches = [m for m in matches if m.sport == sport]  # Filter: 1000 → 50
+matches = sorted(matches, key=lambda m: m.date)     # Sort: 50 items
+```
+
+```python title="❌ Inefficient"
+matches = INITIAL_DATA
+matches = sorted(matches, key=lambda m: m.date)     # Sort: 1000 items
+matches = [m for m in matches if m.sport == sport]  # Filter: 1000 → 50
+```
+
+### 2. Use Database Sorting
+
+In production, sorting happens in the database:
+
+```python title="With a database (SQLAlchemy example)"
+query = db.query(Match)
+
+if sport:
+    query = query.filter(Match.sport == sport)
+
+if sort_by:
+    column = getattr(Match, sort_by)
+    query = query.order_by(column.desc() if sort_order == "desc" else column)
+
+total = query.count()
+results = query.offset((page - 1) * limit).limit(limit).all()
+```
+
+The database handles sorting efficiently with indexes.
+
+### 3. Cache Total Counts
+
+Counting filtered results can be expensive. Cache it:
+
+```python title="With caching (pseudo-code)"
+cache_key = f"matches:{sport}:{status}:count"
+total = cache.get(cache_key)
+
+if total is None:
+    total = len(matches)
+    cache.set(cache_key, total, ttl=60)  # Cache for 60 seconds
+```
+
+---
+
+## Testing Pagination and Sorting
+
+```python title="test_matches.py"
+def test_pagination_first_page():
+    """Test first page returns correct items"""
+    response = client.get("/matches?page=1&limit=2")
+    data = response.json()
+    
+    assert data["page"] == 1
+    assert data["limit"] == 2
+    assert len(data["results"]) == 2
+    assert "total" in data
+    assert "total_pages" in data
+
+
+def test_pagination_invalid_page():
+    """Test requesting non-existent page"""
+    response = client.get("/matches?page=999")
+    data = response.json()
+    
+    assert "error" in data
+
+
+def test_pagination_limit_validation():
+    """Test limit constraints"""
+    response = client.get("/matches?limit=0")
+    assert response.status_code == 422  # Validation error
+    
+    response = client.get("/matches?limit=200")
+    assert response.status_code == 422  # Exceeds max
+
+
+def test_sorting_by_date():
+    """Test sorting by date"""
+    response = client.get("/matches?sort_by=date&sort_order=asc")
+    data = response.json()
+    
+    dates = [m["date"] for m in data["results"]]
+    assert dates == sorted(dates)  # Should be in ascending order
+
+
+def test_sorting_descending():
+    """Test descending sort"""
+    response = client.get("/matches?sort_by=date&sort_order=desc")
+    data = response.json()
+    
+    dates = [m["date"] for m in data["results"]]
+    assert dates == sorted(dates, reverse=True)
+
+
+def test_filter_sort_paginate():
+    """Test combining filters, sorting, and pagination"""
+    response = client.get(
+        "/matches?sport=football&sort_by=date&sort_order=desc&page=1&limit=2"
+    )
+    data = response.json()
+    
+    # All results should be football
+    assert all(m["sport"] == "football" for m in data["results"])
+    
+    # Should be sorted by date descending
+    if len(data["results"]) >= 2:
+        assert data["results"][0]["date"] >= data["results"][1]["date"]
+    
+    # Should have pagination metadata
+    assert data["page"] == 1
+    assert data["limit"] == 2
+```
+
+---
+
+## Summary: Pagination and Sorting
+
+### Pagination Benefits
+✅ Reduces response size (faster, less bandwidth)  
+✅ Reduces server load (less serialization work)  
+✅ Better user experience (shows meaningful chunks)  
+✅ Prevents timeouts (bounded response time)  
+
+### Sorting Benefits
+✅ Users control result order  
+✅ Easier to find specific items  
+✅ Predictable results (same query = same order)  
+
+### Implementation Checklist
+```python
+# ✅ Validate page ≥ 1
+page: Annotated[int, Query(ge=1)] = 1
+
+# ✅ Cap limit to prevent abuse
+limit: Annotated[int, Query(ge=1, le=100)] = 20
+
+# ✅ Calculate total before pagination
+total = len(matches)
+
+# ✅ Sort before paginating
+if sort_by:
+    matches = sorted(matches, ...)
+
+# ✅ Apply pagination last
+start = (page - 1) * limit
+paginated = matches[start:start + limit]
+
+# ✅ Return consistent structure
+return {
+    "total": total,
+    "page": page,
+    "limit": limit,
+    "total_pages": total_pages,
+    "results": paginated,
+}
+```
+
+---
+
+## What's Next
+
+We now have a complete **GET** endpoint with:
+- ✅ Filtering (sport, status, winner, date, team)
+- ✅ Sorting (by any field, ascending or descending)
+- ✅ Pagination (page-based with metadata)
+
+But there's more we can do to improve our query parameters. In the next lesson, we'll explore **query parameter validation** with FastAPI's `Query()` to add constraints, documentation, and better error messages to our filters.

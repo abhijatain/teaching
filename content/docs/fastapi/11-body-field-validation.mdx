@@ -1,0 +1,645 @@
+---
+title: Request Body with Field Validation
+description: Add validation and metadata to model fields using Pydantic's Field.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+# Request Body with Field Validation
+
+We can create and list matches, but what about updating them? Let's build a proper update endpoint with validated request bodies.
+
+## The Problem: Unvalidated Updates
+
+Right now, if we wanted to update a match, we might write:
+
+```python title="matches.py - Naive approach"
+class MatchUpdate(BaseModel):
+    home_team: Optional[str] = None
+    away_team: Optional[str] = None
+    venue: Optional[str] = None
+    score_home: Optional[int] = None
+    score_away: Optional[int] = None
+
+
+@app.patch("/matches/{match_id}", tags=["Matches"])
+def update_match(match_id: int, update: MatchUpdate):
+    # Find and update the match...
+    pass
+```
+
+But this has no validation:
+- Team names could be empty strings
+- Scores could be negative
+- Venue could be 500 characters long
+
+<Callout type="warn" title="Body Parameters Need Validation Too">
+  Just like query and path parameters, request body fields need constraints. Otherwise users can send nonsensical data like `"score_home": -999` or `"venue": ""`.
+</Callout>
+
+---
+
+## The Solution: Field Validation
+
+Pydantic's `Field` adds validation and metadata to model attributes. Import it first:
+
+```diff title="matches.py"
+  from typing import Annotated, Optional, Literal
+  from datetime import date
+  from fastapi import FastAPI, Path, Query, Body
+- from pydantic import BaseModel
++ from pydantic import BaseModel, Field
+  
+  # ... rest of imports ...
+```
+
+<Callout type="warn" title="Important">
+  `Field` is imported from **`pydantic`**, not `fastapi`. This is different from `Query`, `Path`, and `Body` which come from `fastapi`.
+</Callout>
+
+---
+
+## Adding Score Fields to Match Model
+
+Let's extend our `Match` model to include scores:
+
+```python title="matches.py"
+class Match(BaseModel):
+    id: int
+    home_team: str = Field(min_length=2, max_length=50)  # !mark
+    away_team: str = Field(min_length=2, max_length=50)  # !mark
+    sport: Sport
+    date: date
+    status: Status
+    winner: Optional[Winner] = None
+    venue: Optional[str] = Field(None, min_length=3, max_length=100)  # !mark
+    score_home: Optional[int] = Field(None, ge=0, description="Home team score")  # !mark
+    score_away: Optional[int] = Field(None, ge=0, description="Away team score")  # !mark
+```
+
+### Understanding Field Syntax
+
+```python title="Breaking down Field parameters"
+venue: Optional[str] = Field(None, min_length=3, max_length=100)
+                            ^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                            |     Validation constraints
+                            Default value (None = optional)
+
+score_home: Optional[int] = Field(None, ge=0, description="Home team score")
+                                       ^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                                       |     Documentation
+                                       Greater than or equal to 0
+```
+
+<Callout type="info" title="Field() vs Query()">
+  - **`Query()`** — validates query parameters (`?page=1&limit=20`)
+  - **`Path()`** — validates path parameters (`/matches/{match_id}`)
+  - **`Field()`** — validates model attributes (request body fields)
+  
+  All three have the same parameters: `ge`, `le`, `gt`, `lt`, `min_length`, `max_length`, `pattern`, etc.
+</Callout>
+
+---
+
+## Creating a Match Update Model
+
+Now let's create a model specifically for updating matches:
+
+```python title="matches.py"
+class MatchUpdate(BaseModel):
+    """Model for updating match information"""
+    venue: Optional[str] = Field(
+        None,
+        min_length=3,
+        max_length=100,
+        description="Stadium or arena name",
+        examples=["Wembley Stadium"],  # !mark
+    )
+    score_home: Optional[int] = Field(
+        None,
+        ge=0,
+        le=999,
+        description="Home team score (0-999)",
+        examples=[2],  # !mark
+    )
+    score_away: Optional[int] = Field(
+        None,
+        ge=0,
+        le=999,
+        description="Away team score (0-999)",
+        examples=[1],  # !mark
+    )
+    status: Optional[Literal["upcoming", "completed", "cancelled", "abandoned"]] = Field(
+        None,
+        description="Match status",
+    )
+
+
+@app.patch("/matches/{match_id}", tags=["Matches"])
+def update_match(
+    match_id: Annotated[int, Path(ge=1, title="Match ID")],
+    update: MatchUpdate,  # !mark
+):
+    # Find the match
+    for match in INITIAL_DATA:
+        if match.id == match_id:
+            # Update only provided fields
+            if update.venue is not None:
+                match.venue = update.venue
+            if update.score_home is not None:
+                match.score_home = update.score_home
+            if update.score_away is not None:
+                match.score_away = update.score_away
+            if update.status is not None:
+                match.status = Status(update.status)
+            
+            return match
+    
+    return {"error": "Match not found"}
+```
+
+<Callout type="info" title="PATCH vs PUT">
+  - **PATCH** — partial update (only send fields you want to change)
+  - **PUT** — full replacement (send entire resource)
+  
+  We use PATCH because we want to update only specific fields, not replace the entire match.
+</Callout>
+
+---
+
+## Validation in Action
+
+Try these updates in `/docs`:
+
+### Valid Update
+
+```json title="✅ Valid venue update"
+{
+  "venue": "Old Trafford"
+}
+```
+
+Response: Match updated successfully.
+
+### Invalid Updates
+
+```json title="❌ Venue too short"
+{
+  "venue": "AB"
+}
+```
+
+Error: "ensure this value has at least 3 characters"
+
+```json title="❌ Negative score"
+{
+  "score_home": -5
+}
+```
+
+Error: "ensure this value is greater than or equal to 0"
+
+```json title="❌ Score too high"
+{
+  "score_home": 1000
+}
+```
+
+Error: "ensure this value is less than or equal to 999"
+
+<Callout type="info" title="Automatic Validation">
+  FastAPI (via Pydantic) validates **every field** before your function runs. Invalid data is rejected with clear error messages showing exactly which field failed and why.
+</Callout>
+
+---
+
+## Adding Examples for Documentation
+
+The `examples` parameter in `Field()` makes your API docs interactive:
+
+```python title="matches.py"
+class MatchUpdate(BaseModel):
+    venue: Optional[str] = Field(
+        None,
+        min_length=3,
+        max_length=100,
+        examples=["Wembley Stadium", "Camp Nou", "Madison Square Garden"],  # !mark
+    )
+    score_home: Optional[int] = Field(
+        None,
+        ge=0,
+        le=999,
+        examples=[2, 0, 3],  # !mark
+    )
+```
+
+Visit `/docs` and click on the PATCH endpoint. The "Example Value" dropdown now shows your sample data, making it easy for users to try the API.
+
+<Callout type="info" title="Better Developer Experience">
+  Examples appear in:
+  - Interactive docs (`/docs`)
+  - OpenAPI schema (`/openapi.json`)
+  - Auto-generated client libraries
+  
+  Good examples = easier API adoption.
+</Callout>
+
+---
+
+## Mixing Path, Query, and Body Parameters
+
+You can combine all three types in one endpoint:
+
+```python title="matches.py"
+@app.patch("/matches/{match_id}", tags=["Matches"])
+def update_match(
+    match_id: Annotated[int, Path(ge=1, title="Match ID")],  # !mark (path param)
+    update: MatchUpdate,  # !mark (body param)
+    notify: Annotated[bool, Query(description="Send notifications")] = False,  # !mark (query param)
+):
+    """
+    Update match details.
+    
+    - **match_id**: ID from URL path
+    - **update**: New values in request body
+    - **notify**: Optional query parameter
+    """
+    # Find and update match...
+    for match in INITIAL_DATA:
+        if match.id == match_id:
+            if update.venue is not None:
+                match.venue = update.venue
+            if update.score_home is not None:
+                match.score_home = update.score_home
+            if update.score_away is not None:
+                match.score_away = update.score_away
+            
+            if notify:
+                # Send notification (placeholder)
+                print(f"Notifying users about match {match_id} update")
+            
+            return match
+    
+    return {"error": "Match not found"}
+```
+
+Users can now call:
+
+```bash
+PATCH /matches/1?notify=true
+Body: { "venue": "New Stadium" }
+```
+
+<Callout type="info" title="FastAPI Knows the Difference">
+  FastAPI automatically determines:
+  - `match_id` is in the **path** (defined in route: `/matches/{match_id}`)
+  - `update` is in the **body** (it's a Pydantic model)
+  - `notify` is a **query parameter** (not in path, not a Pydantic model)
+  
+  You just write the function; FastAPI handles the rest.
+</Callout>
+
+---
+
+## Multiple Body Parameters
+
+What if you want to update both the match details AND add a comment in the same request?
+
+```python title="matches.py"
+class MatchUpdate(BaseModel):
+    venue: Optional[str] = Field(None, min_length=3, max_length=100)
+    score_home: Optional[int] = Field(None, ge=0, le=999)
+    score_away: Optional[int] = Field(None, ge=0, le=999)
+    status: Optional[Literal["upcoming", "completed", "cancelled", "abandoned"]] = None
+
+
+class UpdateComment(BaseModel):  # !mark
+    author: str = Field(min_length=2, max_length=50)  # !mark
+    text: str = Field(min_length=10, max_length=500)  # !mark
+    timestamp: Optional[date] = Field(None, description="Comment date")  # !mark
+
+
+@app.patch("/matches/{match_id}", tags=["Matches"])
+def update_match_with_comment(
+    match_id: Annotated[int, Path(ge=1)],
+    update: MatchUpdate,  # !mark (first body param)
+    comment: UpdateComment,  # !mark (second body param)
+):
+    """Update match and add a comment"""
+    # Find and update...
+    return {"match_id": match_id, "update": update, "comment": comment}
+```
+
+When you have multiple Pydantic models, FastAPI expects a JSON body like:
+
+```json title="Request body with multiple models"
+{
+  "update": {
+    "venue": "Emirates Stadium",
+    "score_home": 2,
+    "score_away": 1
+  },
+  "comment": {
+    "author": "John Doe",
+    "text": "Great match! Arsenal dominated the second half."
+  }
+}
+```
+
+<Callout type="info" title="Automatic Nesting">
+  When you have **multiple body parameters**, FastAPI uses the parameter names as JSON keys. Each model becomes a nested object in the request body.
+</Callout>
+
+---
+
+## Singular Values in Body
+
+What if you want a single value (like `importance: int`) in the body alongside your model?
+
+```python title="matches.py"
+from fastapi import Body  # !mark
+
+
+@app.patch("/matches/{match_id}", tags=["Matches"])
+def update_match_with_priority(
+    match_id: Annotated[int, Path(ge=1)],
+    update: MatchUpdate,
+    priority: Annotated[int, Body(ge=1, le=5)],  # !mark
+):
+    """Update match with priority rating (1-5)"""
+    return {
+        "match_id": match_id,
+        "update": update,
+        "priority": priority,
+    }
+```
+
+Now the request body looks like:
+
+```json title="Body with model + singular value"
+{
+  "update": {
+    "venue": "Wembley Stadium",
+    "score_home": 3,
+    "score_away": 2
+  },
+  "priority": 5
+}
+```
+
+<Callout type="info" title="Why Body() Here?">
+  Without `Body()`, FastAPI would interpret `priority: int` as a query parameter. Using `Body(ge=1, le=5)` tells FastAPI:
+  1. This is a body parameter
+  2. It must be between 1 and 5
+</Callout>
+
+---
+
+## Embedding a Single Body Parameter
+
+By default, if you have **only one** Pydantic model, FastAPI expects the body to contain the model fields directly:
+
+```python title="matches.py - Default behavior"
+@app.patch("/matches/{match_id}")
+def update_match(match_id: int, update: MatchUpdate):
+    pass
+```
+
+Expected body:
+
+```json title="Direct fields (no wrapper)"
+{
+  "venue": "Wembley Stadium",
+  "score_home": 3,
+  "score_away": 2
+}
+```
+
+But what if you want consistency with multiple-model endpoints? Use `embed=True`:
+
+```python title="matches.py - Embedded single model"
+@app.patch("/matches/{match_id}")
+def update_match(
+    match_id: int,
+    update: Annotated[MatchUpdate, Body(embed=True)],  # !mark
+):
+    pass
+```
+
+Now the body needs a wrapper key:
+
+```json title="Wrapped in 'update' key"
+{
+  "update": {
+    "venue": "Wembley Stadium",
+    "score_home": 3,
+    "score_away": 2
+  }
+}
+```
+
+<Callout type="info" title="When to Use embed=True">
+  Use it when:
+  - You want consistent API design (all endpoints use nested objects)
+  - You might add more body parameters later
+  - You're migrating from a multi-parameter endpoint
+  
+  Don't use it when:
+  - You want simple, flat request bodies
+  - You're building a minimal API
+</Callout>
+
+---
+
+## Complete Update Endpoint Example
+
+Here's a production-ready update endpoint with all validations:
+
+```python title="matches.py"
+from pydantic import model_validator
+
+
+class MatchUpdate(BaseModel):
+    """Model for updating match information"""
+    venue: Optional[str] = Field(
+        None,
+        min_length=3,
+        max_length=100,
+        description="Stadium or arena name",
+        examples=["Wembley Stadium"],
+    )
+    score_home: Optional[int] = Field(
+        None,
+        ge=0,
+        le=999,
+        description="Home team score",
+    )
+    score_away: Optional[int] = Field(
+        None,
+        ge=0,
+        le=999,
+        description="Away team score",
+    )
+    status: Optional[Literal["upcoming", "completed", "cancelled", "abandoned"]] = None
+    winner: Optional[Literal["home_team", "away_team", "draw"]] = None
+    
+    @model_validator(mode='after')  # !mark
+    def validate_scores_and_status(self):  # !mark
+        """Validate relationships between fields"""
+        # If status is completed, scores are required
+        if self.status == "completed":
+            if self.score_home is None or self.score_away is None:
+                raise ValueError("Completed matches must have scores")
+        
+        # If scores are provided, determine winner automatically
+        if self.score_home is not None and self.score_away is not None:
+            if self.score_home > self.score_away:
+                self.winner = "home_team"
+            elif self.score_away > self.score_home:
+                self.winner = "away_team"
+            else:
+                self.winner = "draw"
+        
+        return self
+
+
+@app.patch("/matches/{match_id}", tags=["Matches"])
+def update_match(
+    match_id: Annotated[int, Path(ge=1, title="Match ID")],
+    update: MatchUpdate,
+):
+    """
+    Update match details with validation.
+    
+    - Scores must be non-negative
+    - Completed matches require scores
+    - Winner is auto-calculated from scores
+    """
+    for match in INITIAL_DATA:
+        if match.id == match_id:
+            # Apply updates
+            if update.venue is not None:
+                match.venue = update.venue
+            if update.score_home is not None:
+                match.score_home = update.score_home
+            if update.score_away is not None:
+                match.score_away = update.score_away
+            if update.status is not None:
+                match.status = Status(update.status)
+            if update.winner is not None:
+                match.winner = Winner(update.winner)
+            
+            return match
+    
+    return {"error": "Match not found"}
+```
+
+<Callout type="info" title="Business Logic in Validators">
+  The `@model_validator` ensures:
+  1. Completed matches have scores
+  2. Winner is calculated automatically from scores
+  3. All validation happens **before** the function runs
+  
+  This keeps your endpoint logic clean and focused on updating data, not validating it.
+</Callout>
+
+---
+
+## Testing Update Endpoints
+
+Try these scenarios in `/docs`:
+
+### Scenario 1: Update venue only
+
+```json title="Request"
+{
+  "venue": "Camp Nou"
+}
+```
+
+Result: ✅ Only venue changes, other fields unchanged
+
+### Scenario 2: Update scores
+
+```json title="Request"
+{
+  "score_home": 3,
+  "score_away": 1
+}
+```
+
+Result: ✅ Scores updated, winner auto-calculated as "home_team"
+
+### Scenario 3: Mark as completed with scores
+
+```json title="Request"
+{
+  "status": "completed",
+  "score_home": 2,
+  "score_away": 2
+}
+```
+
+Result: ✅ Status and scores updated, winner auto-calculated as "draw"
+
+### Scenario 4: Invalid - completed without scores
+
+```json title="Request"
+{
+  "status": "completed"
+}
+```
+
+Result: ❌ Error: "Completed matches must have scores"
+
+---
+
+## Field Validation Summary
+
+Here's what you can validate with `Field()`:
+
+```python title="Common Field validations"
+# String constraints
+name: str = Field(min_length=2, max_length=50, pattern="^[A-Za-z ]+$")
+
+# Numeric constraints
+score: int = Field(ge=0, le=999)
+rating: float = Field(gt=0.0, le=5.0)
+
+# Documentation
+venue: str = Field(
+    min_length=3,
+    title="Venue Name",
+    description="Stadium or arena where the match is played",
+    examples=["Wembley Stadium", "Camp Nou"],
+)
+
+# Optional with defaults
+priority: int = Field(default=3, ge=1, le=5)
+
+# Required (no default)
+team_name: str = Field(min_length=2)
+```
+
+<Callout type="info" title="Field() = Query() = Path()">
+  All three functions accept the same parameters:
+  - **Numeric:** `ge`, `gt`, `le`, `lt`
+  - **String:** `min_length`, `max_length`, `pattern`
+  - **Documentation:** `title`, `description`, `examples`
+  - **Other:** `deprecated`, `alias`
+  
+  Learn one, know them all.
+</Callout>
+
+---
+
+## What's Next
+
+We've now covered:
+- ✅ Field validation with `Field()`
+- ✅ Mixing path, query, and body parameters
+- ✅ Multiple body parameters
+- ✅ Model validators for cross-field validation
+- ✅ Embedding single body parameters
+
+In the next lesson, we'll explore **nested models** — matches with lists of players, events, and complex hierarchical data.
