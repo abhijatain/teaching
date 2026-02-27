@@ -1,6 +1,6 @@
 ---
 title: Nested Models
-description: Build complex data structures by nesting Pydantic models inside each other, just like real sports data.
+description: Build complex data structures by nesting Pydantic models inside each other to represent team lineups.
 ---
 
 import { Callout } from 'fumadocs-ui/components/callout';
@@ -11,7 +11,7 @@ from enum import Enum
 from typing import Annotated, List, Literal, Optional
 
 from fastapi import FastAPI, Path, Query
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, computed_field, field_validator, model_validator
 
 app = FastAPI(title="Sports Matches API")
 
@@ -37,40 +37,17 @@ class Winner(str, Enum):
     draw = "draw"
 
 
+class TeamFilter(str, Enum):
+    won = "won"
+    lost = "lost"
+    draw = "draw"
+
+
 class Player(BaseModel):
     number: int = Field(ge=1, le=99, description="Jersey number")
     name: str = Field(min_length=2, max_length=50)
     position: Literal["goalkeeper", "defender", "midfielder", "forward"]
     is_captain: bool = False
-
-
-class MatchEvent(BaseModel):
-    minute: int = Field(ge=0, le=120, description="Minute when event occurred")
-    event_type: Literal["goal", "yellow_card", "red_card", "substitution"]
-    team: Literal["home", "away"]
-    player_name: str = Field(min_length=2, max_length=50)
-    description: Optional[str] = Field(None, max_length=200)
-
-
-class TeamStats(BaseModel):
-    possession_percent: int = Field(ge=0, le=100)
-    shots: int = Field(ge=0)
-    shots_on_target: int = Field(ge=0)
-    corners: int = Field(ge=0)
-    fouls: int = Field(ge=0)
-
-    @model_validator(mode='after')
-    def validate_shots(self):
-        if self.shots_on_target > self.shots:
-            raise ValueError("shots_on_target cannot exceed total shots")
-        return self
-
-
-class MatchStatistics(BaseModel):
-    home_stats: TeamStats
-    away_stats: TeamStats
-    attendance: Optional[int] = Field(None, ge=0, description="Number of spectators")
-    referee: Optional[str] = Field(None, min_length=2, max_length=50)
 
 
 class Match(BaseModel):
@@ -82,25 +59,79 @@ class Match(BaseModel):
     sport: Sport
     status: Status
     winner: Optional[Winner] = None
-    score_home: Optional[int] = Field(None, ge=0, description="Home team score")
-    score_away: Optional[int] = Field(None, ge=0, description="Away team score")
     home_lineup: Optional[List[Player]] = None
     away_lineup: Optional[List[Player]] = None
-    events: List[MatchEvent] = Field(default_factory=list)
-    statistics: Optional[MatchStatistics] = None
+
+    @field_validator('home_team', 'away_team')
+    @classmethod
+    def normalize_team_name(cls, value):
+        return value.strip().lower()
+
+    @field_validator('venue')
+    @classmethod
+    def normalize_venue(cls, value):
+        if value is not None:
+            return value.strip().lower()
+        return value
 
 
 class MatchFilters(BaseModel):
-    sport: Optional[Sport] = Field(None, title="Sport Type", description="Filter matches by sport")
-    status: Optional[Status] = Field(None, title="Match Status", description="Filter by match status")
-    winner: Optional[Winner] = None
-    team: Optional[str] = Field(None, min_length=3, max_length=50,
-                                description="Filter by team name (case-insensitive partial match)")
+    sport: Optional[Sport] = Field(
+        None,
+        title="Sport Type",
+        description="Filter matches by sport",
+    )
+    status: Optional[Status] = Field(
+        None,
+        title="Match Status",
+        description="Filter by match status",
+    )
+    winner: Optional[Winner] = Field(
+        None,
+        title="Winner",
+        description="Filter by match winner",
+    )
+    team: Optional[str] = Field(
+        None,
+        min_length=3,
+        max_length=50,
+        pattern="^[A-Za-z0-9 ]+$",
+        title="Team Name",
+        description="Filter by team name. Case-insensitive partial match. Letters, numbers and spaces only.",
+    )
+    team_filter: Optional[TeamFilter] = Field(
+        None,
+        title="Team Result Filter",
+        description="Filter by how the team performed — won, lost, or draw. Requires team to be set.",
+    )
+
+    @model_validator(mode='after')
+    def validate_winner_and_team_filter(self):
+        if self.team_filter and self.winner:
+            raise ValueError("team_filter and winner cannot be used together")
+        if (self.team_filter or self.winner) and self.status not in (Status.completed, None):
+            raise ValueError("team_filter and winner can only be used when status is 'completed'")
+        return self
+
+    @field_validator('team')
+    @classmethod
+    def normalize_team(cls, value):
+        if value is not None:
+            return value.strip().lower()
+        return value
 
 
 class DateRangeFilters(BaseModel):
-    from_date: Optional[date] = Field(None, description="Matches on or after this date (YYYY-MM-DD)")
-    to_date: Optional[date] = Field(None, description="Matches on or before this date (YYYY-MM-DD)")
+    from_date: Optional[date] = Field(
+        None,
+        title="Start Date",
+        description="Filter matches on or after this date (YYYY-MM-DD)",
+    )
+    to_date: Optional[date] = Field(
+        None,
+        title="End Date",
+        description="Filter matches on or before this date (YYYY-MM-DD)",
+    )
 
     @model_validator(mode='after')
     def validate_date_range(self):
@@ -114,17 +145,22 @@ class PaginationParams(BaseModel):
     page: int = Field(1, ge=1, description="Page number (1-indexed)")
     limit: int = Field(20, ge=1, le=100, description="Items per page (max 100)")
 
+    @computed_field
+    @property
+    def offset(self) -> int:
+        return (self.page - 1) * self.limit
+
 
 INITIAL_DATA: List[Match] = [
     Match(id=1, home_team="Arsenal", away_team="Chelsea", sport=Sport.football,
           date=date(2025, 10, 21), status=Status.completed, winner=Winner.draw,
-          venue="Emirates Stadium", score_home=2, score_away=2),
+          venue="Emirates Stadium"),
     Match(id=2, home_team="Lakers", away_team="Warriors", sport=Sport.basketball,
           date=date(2025, 11, 15), status=Status.completed, winner=Winner.home_team,
-          venue="Crypto.com Arena", score_home=112, score_away=98),
+          venue="Crypto.com Arena"),
     Match(id=3, home_team="Real Madrid", away_team="Barcelona", sport=Sport.football,
           date=date(2026, 4, 10), status=Status.completed, winner=Winner.draw,
-          venue="Santiago Bernabeu", score_home=1, score_away=1),
+          venue="Santiago Bernabeu"),
     Match(id=4, home_team="Knicks", away_team="Celtics", sport=Sport.basketball,
           date=date(2026, 3, 5), status=Status.upcoming, winner=None,
           venue="Madison Square Garden"),
@@ -133,11 +169,24 @@ INITIAL_DATA: List[Match] = [
           venue="Yankee Stadium"),
     Match(id=6, home_team="India", away_team="Pakistan", sport=Sport.cricket,
           date=date(2026, 3, 24), status=Status.completed, winner=Winner.home_team,
-          venue="Narendra Modi Stadium", score_home=285, score_away=240),
+          venue="Narendra Modi Stadium"),
     Match(id=7, home_team="Lakers", away_team="Warriors", sport=Sport.basketball,
           date=date(2025, 1, 15), status=Status.completed, winner=Winner.away_team,
-          venue="Crypto.com Arena", score_home=95, score_away=108),
+          venue="Crypto.com Arena"),
 ]
+
+
+class SortParams(BaseModel):
+    sort_by: Optional[Literal["date", "sport", "status"]] = Field(
+        None,
+        title="Sort By",
+        description="Field to sort results by",
+    )
+    sort_order: Literal["asc", "desc"] = Field(
+        "asc",
+        title="Sort Order",
+        description="Sort direction — asc for ascending, desc for descending",
+    )
 
 
 @app.get("/health", tags=["System"])
@@ -150,6 +199,7 @@ def list_matches(
     filters: Annotated[MatchFilters, Query()],
     date_range: Annotated[DateRangeFilters, Query()],
     pagination: Annotated[PaginationParams, Query()],
+    sorting: Annotated[SortParams, Query()],
 ):
     matches = list(INITIAL_DATA)
 
@@ -163,14 +213,37 @@ def list_matches(
         team_lower = filters.team.lower()
         matches = [m for m in matches if
                    team_lower in m.home_team.lower() or team_lower in m.away_team.lower()]
+    if filters.team_filter:
+        if filters.team_filter == TeamFilter.won:
+            matches = [m for m in matches if
+                       (filters.team.lower() in m.home_team.lower() and m.winner == Winner.home_team) or
+                       (filters.team.lower() in m.away_team.lower() and m.winner == Winner.away_team)]
+        elif filters.team_filter == TeamFilter.lost:
+            matches = [m for m in matches if
+                       (filters.team.lower() in m.home_team.lower() and m.winner == Winner.away_team) or
+                       (filters.team.lower() in m.away_team.lower() and m.winner == Winner.home_team)]
+        elif filters.team_filter == TeamFilter.draw:
+            matches = [m for m in matches if
+                       (filters.team.lower() in m.home_team.lower() or
+                        filters.team.lower() in m.away_team.lower()) and
+                       m.winner == Winner.draw]
 
     if date_range.from_date:
         matches = [m for m in matches if m.date >= date_range.from_date]
     if date_range.to_date:
         matches = [m for m in matches if m.date <= date_range.to_date]
 
+    if sorting.sort_by:
+        reverse = sorting.sort_order == "desc"
+        if sorting.sort_by == "date":
+            matches = sorted(matches, key=lambda m: m.date, reverse=reverse)
+        elif sorting.sort_by == "sport":
+            matches = sorted(matches, key=lambda m: m.sport.value, reverse=reverse)
+        elif sorting.sort_by == "status":
+            matches = sorted(matches, key=lambda m: m.status.value, reverse=reverse)
+
     total = len(matches)
-    start = (pagination.page - 1) * pagination.limit
+    start = pagination.offset
     paginated = matches[start:start + pagination.limit]
 
     return {"total": total, "page": pagination.page,
@@ -208,13 +281,13 @@ def create_match(match: Match):
 
 # Nested Models
 
-So far our `Match` model has been flat — just a single level of fields. But real sports data is hierarchical: matches have lineups (which contain players), events (goals, cards, substitutions), and statistics (shots, possession, fouls). In this lesson, we'll build complex data structures by nesting Pydantic models inside each other.
+So far our `Match` model has been flat — just a single level of fields. But real sports data is hierarchical: matches have lineups that contain individual players with their own attributes. In this lesson, we'll build complex data structures by nesting Pydantic models inside each other.
 
 ---
 
 ## Where We Are
 
-Your current `Match` model looks like this:
+Your current `Match` model from lesson 5 looks like this:
 
 ```python title="matches.py"
 class Match(BaseModel):
@@ -226,46 +299,33 @@ class Match(BaseModel):
     sport: Sport
     status: Status
     winner: Optional[Winner] = None
-    score_home: Optional[int] = Field(None, ge=0)
-    score_away: Optional[int] = Field(None, ge=0)
+
+    @field_validator('home_team', 'away_team')
+    @classmethod
+    def normalize_team_name(cls, value):
+        return value.strip().lower()
+
+    @field_validator('venue')
+    @classmethod
+    def normalize_venue(cls, value):
+        if value is not None:
+            return value.strip().lower()
+        return value
 ```
 
-This works for basic match data. But what if you want to track:
-- **Players** in each lineup with jersey numbers and positions
-- **Events** that happened during the match (goals, cards, substitutions)
-- **Statistics** like possession percentage, shots, and fouls
+This works for basic match data. But what if you want to track which players started in each match? You could add fields like `home_player_1`, `home_player_2`, etc., but that's brittle and doesn't scale. Instead, we'll use **nested models** — a `Player` model inside the `Match` model.
 
-You could try adding more flat fields:
-
-```python title="Flat approach — doesn't scale"
-class Match(BaseModel):
-    # ... existing fields ...
-    player_1_name: str
-    player_1_number: int
-    player_1_position: str
-    player_2_name: str
-    player_2_number: int
-    player_2_position: str
-    # ... repeat for 22+ players? 😱
-```
-
-This becomes unmanageable fast.
-
-<Callout type="warn" title="Why Flat Models Don't Scale">
-  With flat fields you can't:
-  - Validate related data together (player number with player name)
-  - Have variable numbers of items (some teams have 11 players, some have substitutes)
-  - Reuse structures (both teams need the same player fields)
-  - Keep the code readable
+<Callout type="info" title="Why Nested Models?">
+  Nested models let you represent complex relationships while keeping validation at each level. A `Player` isn't just a string — it's an entity with a jersey number, name, position, and captain status. Each of those fields needs its own validation rules.
 </Callout>
 
 ---
 
-## Step 1 — Create a Player Model
+## Step 1 — Create the Player Model
 
-Instead of adding player fields to `Match`, create a separate `Player` model:
+Before you can nest a model, you need to define it. Add this **before** the `Match` class:
 
-```python title="matches.py - add this before Match"
+```python title="matches.py - add before Match"
 class Player(BaseModel):
     number: int = Field(ge=1, le=99, description="Jersey number")
     name: str = Field(min_length=2, max_length=50)
@@ -273,12 +333,21 @@ class Player(BaseModel):
     is_captain: bool = False
 ```
 
-This is a standalone Pydantic model with its own validation rules. Notice:
-- `number` is constrained to 1-99 (standard jersey numbers)
-- `position` uses `Literal` to allow only four valid values
-- `is_captain` has a default of `False`
+This model uses everything you've learned:
+- `Field(ge=1, le=99)` — jersey numbers between 1 and 99
+- `Field(min_length=2, max_length=50)` — player names with sensible bounds
+- `Literal[...]` — position must be one of four values
+- `is_captain: bool = False` — optional boolean with a default
 
-Now we can use this model as a field type in `Match`:
+<Callout type="info" title="Model Order Matters">
+  Define `Player` before `Match` because `Match` will reference it. Python needs to know what `Player` is before it can use it as a type annotation.
+</Callout>
+
+---
+
+## Step 2 — Add Lineup Fields to Match
+
+Now that `Player` exists, you can use it as a type in `Match`. Add two new fields:
 
 ```diff title="matches.py"
   class Match(BaseModel):
@@ -290,80 +359,103 @@ Now we can use this model as a field type in `Match`:
       sport: Sport
       status: Status
       winner: Optional[Winner] = None
-      score_home: Optional[int] = Field(None, ge=0)
-      score_away: Optional[int] = Field(None, ge=0)
 +     home_lineup: Optional[List[Player]] = None
 +     away_lineup: Optional[List[Player]] = None
+
+      @field_validator('home_team', 'away_team')
+      @classmethod
+      def normalize_team_name(cls, value):
+          return value.strip().lower()
+
+      @field_validator('venue')
+      @classmethod
+      def normalize_venue(cls, value):
+          if value is not None:
+              return value.strip().lower()
+          return value
 ```
 
-`Optional[List[Player]]` means:
-- The field can be `None` (lineup not provided yet)
-- If provided, it must be a list
-- Every item in that list must be a valid `Player`
+Let's break down the type annotation:
+- `List[Player]` — a list where every item is a `Player` model
+- `Optional[...]` — the lineup can be `None` (many matches don't have lineups recorded)
+- `= None` — the default value when not provided
 
-<Callout type="info" title="How Pydantic Validates Nested Models">
-  When you send a request with nested data, Pydantic:
-  1. Validates the outer `Match` fields first
-  2. Then validates each `Player` in `home_lineup`
-  3. Then validates each `Player` in `away_lineup`
-  
-  If any player has an invalid jersey number or position, the entire request is rejected with a clear error pointing to exactly which player failed validation.
-</Callout>
+This pattern — `Optional[List[SomeModel]]` — is common for collections that may or may not be present.
 
 ---
 
-## Testing the Player Model
+## Step 3 — Test Creating a Match with Lineup
 
-Try creating a match with a lineup. In `/docs`, click on `POST /matches` and use this JSON:
+Now you can send player data nested inside match data. Try this POST request:
 
-```json title="Request body"
-{
-  "home_team": "Arsenal",
-  "away_team": "Chelsea",
-  "sport": "football",
-  "date": "2026-03-15",
-  "status": "upcoming",
-  "venue": "Emirates Stadium",
-  "home_lineup": [
-    {
-      "number": 1,
-      "name": "Aaron Ramsdale",
-      "position": "goalkeeper",
-      "is_captain": false
-    },
-    {
-      "number": 4,
-      "name": "Ben White",
-      "position": "defender",
-      "is_captain": false
-    },
-    {
-      "number": 5,
-      "name": "Thomas Partey",
-      "position": "midfielder",
-      "is_captain": true
-    }
-  ]
-}
+```bash
+curl -X POST http://localhost:8000/matches \
+  -H "Content-Type: application/json" \
+  -d '{
+    "home_team": "Arsenal",
+    "away_team": "Chelsea",
+    "sport": "football",
+    "date": "2026-03-15",
+    "status": "upcoming",
+    "venue": "Emirates Stadium",
+    "home_lineup": [
+      {
+        "number": 1,
+        "name": "Aaron Ramsdale",
+        "position": "goalkeeper",
+        "is_captain": false
+      },
+      {
+        "number": 6,
+        "name": "Gabriel",
+        "position": "defender",
+        "is_captain": false
+      },
+      {
+        "number": 8,
+        "name": "Martin Ødegaard",
+        "position": "midfielder",
+        "is_captain": true
+      },
+      {
+        "number": 9,
+        "name": "Gabriel Jesus",
+        "position": "forward",
+        "is_captain": false
+      }
+    ]
+  }'
 ```
 
-This works. Now try an invalid player:
+FastAPI validates:
+1. The `Match` fields (team names, sport, date, etc.)
+2. Each `Player` in `home_lineup` (number range, name length, position value)
 
-```json title="Invalid jersey number"
-{
-  "home_team": "Arsenal",
-  "away_team": "Chelsea",
-  "sport": "football",
-  "date": "2026-03-15",
-  "status": "upcoming",
-  "home_lineup": [
-    {
-      "number": 150,
-      "name": "Invalid Player",
-      "position": "defender"
-    }
-  ]
-}
+If validation passes, the match is created with the full lineup structure.
+
+---
+
+## Step 4 — Test Validation at Nested Levels
+
+The power of nested models is that each level has its own validation. Try sending invalid player data:
+
+```bash
+curl -X POST http://localhost:8000/matches \
+  -H "Content-Type: application/json" \
+  -d '{
+    "home_team": "Arsenal",
+    "away_team": "Chelsea",
+    "sport": "football",
+    "date": "2026-03-15",
+    "status": "upcoming",
+    "home_lineup": [
+      {
+        "number": 100,
+        "name": "Aaron Ramsdale",
+        "position": "goalkeeper"
+      }
+    ]
+  }'
 ```
 
 Response:
@@ -381,254 +473,99 @@ Response:
 }
 ```
 
-Notice the `loc` path: `["body", "home_lineup", 0, "number"]` — it tells you exactly where the error is:
-- In the request body
-- Inside `home_lineup`
-- At index 0 (first player)
-- In the `number` field
+Notice the error location: `["body", "home_lineup", 0, "number"]`
+- `body` — error is in the request body
+- `home_lineup` — specifically in the lineup field
+- `0` — the first player in the list (zero-indexed)
+- `number` — the field that failed validation
 
-<Callout type="info" title="Validation Goes Deep">
-  Nested validation isn't superficial — Pydantic validates all the way down. If you nest five levels deep, every field at every level gets validated. Errors point to the exact location, even in complex structures.
-</Callout>
-
----
-
-## Step 2 — Add Match Events
-
-Real matches have timestamped events: goals, cards, substitutions. Create another nested model:
-
-```python title="matches.py - add this before Match"
-class MatchEvent(BaseModel):
-    minute: int = Field(ge=0, le=120, description="Minute when event occurred")
-    event_type: Literal["goal", "yellow_card", "red_card", "substitution"]
-    team: Literal["home", "away"]
-    player_name: str = Field(min_length=2, max_length=50)
-    description: Optional[str] = Field(None, max_length=200)
-```
-
-Then add it to `Match`:
-
-```diff title="matches.py"
-  class Match(BaseModel):
-      # ... existing fields ...
-      home_lineup: Optional[List[Player]] = None
-      away_lineup: Optional[List[Player]] = None
-+     events: List[MatchEvent] = Field(default_factory=list)
-```
-
-Notice the different syntax: `Field(default_factory=list)` instead of `None`.
-
-Breaking this down:
-- `events: List[MatchEvent]` — this field is a list of events, always present (not `Optional`)
-- `= Field(default_factory=list)` — if not provided, default to an empty list `[]`
-
-Why `default_factory=list` instead of `= []`?
-
-```python title="Why default_factory is needed"
-# ❌ Wrong — all Match instances would share the same list!
-events: List[MatchEvent] = []
-
-# ✅ Correct — each Match gets its own new list
-events: List[MatchEvent] = Field(default_factory=list)
-```
-
-In Python, mutable default arguments (like `[]` or `{}`) are shared across all instances. `default_factory` creates a new list for each `Match` instance.
-
-Now test it:
-
-```json title="Match with events"
-{
-  "home_team": "Arsenal",
-  "away_team": "Chelsea",
-  "sport": "football",
-  "date": "2026-03-15",
-  "status": "completed",
-  "venue": "Emirates Stadium",
-  "score_home": 2,
-  "score_away": 1,
-  "events": [
-    {
-      "minute": 23,
-      "event_type": "goal",
-      "team": "home",
-      "player_name": "Bukayo Saka",
-      "description": "Right-footed shot from outside the box"
-    },
-    {
-      "minute": 67,
-      "event_type": "yellow_card",
-      "team": "away",
-      "player_name": "Enzo Fernandez"
-    },
-    {
-      "minute": 89,
-      "event_type": "goal",
-      "team": "home",
-      "player_name": "Gabriel Jesus"
-    }
-  ]
-}
-```
-
-Each event is validated independently — if minute 23 is valid but minute 150 isn't, you get an error pointing to the invalid event.
-
----
-
-## Step 3 — Add Match Statistics (Nested Model Inside Nested Model)
-
-Statistics have structure too: possession, shots, fouls — and you need these for *both* teams. This is a perfect case for a nested model inside a nested model.
-
-First, create a model for one team's stats:
-
-```python title="matches.py - add before Match"
-class TeamStats(BaseModel):
-    possession_percent: int = Field(ge=0, le=100)
-    shots: int = Field(ge=0)
-    shots_on_target: int = Field(ge=0)
-    corners: int = Field(ge=0)
-    fouls: int = Field(ge=0)
-
-    @model_validator(mode='after')
-    def validate_shots(self):
-        if self.shots_on_target > self.shots:
-            raise ValueError("shots_on_target cannot exceed total shots")
-        return self
-```
-
-This model includes cross-field validation: shots on target can't exceed total shots.
-
-Then create a model that wraps both teams' stats:
-
-```python title="matches.py - add before Match"
-class MatchStatistics(BaseModel):
-    home_stats: TeamStats
-    away_stats: TeamStats
-    attendance: Optional[int] = Field(None, ge=0, description="Number of spectators")
-    referee: Optional[str] = Field(None, min_length=2, max_length=50)
-```
-
-Finally, add it to `Match`:
-
-```diff title="matches.py"
-  class Match(BaseModel):
-      # ... existing fields ...
-      home_lineup: Optional[List[Player]] = None
-      away_lineup: Optional[List[Player]] = None
-      events: List[MatchEvent] = Field(default_factory=list)
-+     statistics: Optional[MatchStatistics] = None
-```
-
-Now you have three levels of nesting:
-1. `Match` contains `statistics`
-2. `statistics` (type `MatchStatistics`) contains `home_stats` and `away_stats`
-3. Each of those is a `TeamStats` with validated fields
-
-Test it:
-
-```json title="Match with statistics"
-{
-  "home_team": "Arsenal",
-  "away_team": "Chelsea",
-  "sport": "football",
-  "date": "2026-03-15",
-  "status": "completed",
-  "venue": "Emirates Stadium",
-  "score_home": 3,
-  "score_away": 1,
-  "statistics": {
-    "home_stats": {
-      "possession_percent": 58,
-      "shots": 15,
-      "shots_on_target": 8,
-      "corners": 6,
-      "fouls": 10
-    },
-    "away_stats": {
-      "possession_percent": 42,
-      "shots": 9,
-      "shots_on_target": 3,
-      "corners": 4,
-      "fouls": 14
-    },
-    "attendance": 60000,
-    "referee": "Michael Oliver"
-  }
-}
-```
-
-Try sending invalid stats:
-
-```json title="Invalid - shots on target > total shots"
-{
-  "home_team": "Arsenal",
-  "away_team": "Chelsea",
-  "sport": "football",
-  "date": "2026-03-15",
-  "status": "completed",
-  "statistics": {
-    "home_stats": {
-      "possession_percent": 58,
-      "shots": 10,
-      "shots_on_target": 15,
-      "corners": 6,
-      "fouls": 10
-    }
-  }
-}
-```
-
-Response:
-
-```json title="Validation error"
-{
-  "detail": [
-    {
-      "loc": ["body", "statistics", "home_stats"],
-      "msg": "shots_on_target cannot exceed total shots",
-      "type": "value_error"
-    }
-  ]
-}
-```
-
-The `@model_validator` in `TeamStats` caught the error, and the error location tells you exactly which team's stats failed.
+This precision makes debugging easy. The error points exactly to the problematic field, even deep inside nested structures.
 
 ---
 
 ## How Nested Validation Works
 
-When you send a request with nested models, validation happens in order:
+When you send a request with nested models, validation happens layer by layer:
 
 ```python title="Validation flow"
 Match(
     home_team="Arsenal",
-    statistics=MatchStatistics(
-        home_stats=TeamStats(
-            shots=10,
-            shots_on_target=15  # ❌ Invalid
+    home_lineup=[
+        Player(
+            number=100,  # ❌ Invalid - exceeds le=99
+            name="Aaron Ramsdale",
+            position="goalkeeper"
         )
-    )
+    ]
 )
 ```
 
-1. Pydantic validates `Match` fields (`home_team`, etc.)
-2. Pydantic sees `statistics` is a `MatchStatistics` — validates its fields
-3. Pydantic sees `home_stats` is a `TeamStats` — validates its fields
-4. `TeamStats` field validation passes (`shots=10` is valid)
-5. `TeamStats` model validator runs — **fails** because `shots_on_target > shots`
-6. Error propagates up with full path: `["body", "statistics", "home_stats"]`
+1. Pydantic validates `Match` fields (`home_team`, `sport`, `date`)
+2. Pydantic sees `home_lineup` is a `List[Player]` — starts validating the list
+3. For each item in the list, Pydantic validates it as a `Player`
+4. `Player` field validation runs — **fails** because `number=100` exceeds `le=99`
+5. Error propagates up with full path: `["body", "home_lineup", 0, "number"]`
 
 If validation succeeds at all levels, you get a fully validated nested structure. If it fails at any level, you get a clear error message with the exact path to the problem.
 
 <Callout type="info" title="Validation Is Recursive">
-  Nested models aren't just organizational — each level has its own field validators and model validators. Pydantic validates the entire tree, not just the top level. This is what makes nested models powerful: you can enforce constraints at every level of your data structure.
+  Nested models aren't just organizational — each level has its own field validators. Pydantic validates the entire tree, not just the top level. This is what makes nested models powerful: you can enforce constraints at every level of your data structure.
+</Callout>
+
+---
+
+## Optional vs Required Nested Fields
+
+You made `home_lineup` optional because not all matches have lineup data recorded. But what if lineups are required for certain match types? You can make them non-optional:
+
+```python title="Hypothetical - required lineups"
+class Match(BaseModel):
+    # ... other fields ...
+    home_lineup: List[Player]  # Not Optional - must be provided
+    away_lineup: List[Player]  # Not Optional - must be provided
+```
+
+Now every match creation request must include both lineups. If either is missing, FastAPI returns a validation error.
+
+You can also require non-empty lists:
+
+```python title="Hypothetical - at least one player required"
+class Match(BaseModel):
+    # ... other fields ...
+    home_lineup: List[Player] = Field(min_length=1)
+    away_lineup: List[Player] = Field(min_length=1)
+```
+
+This ensures that if lineups are provided, they're not empty arrays.
+
+<Callout type="warn" title="Choose Defaults Carefully">
+  Think about what makes sense for your API. If most matches don't have lineups, make them optional. If lineups are essential, make them required. The right choice depends on how your API will be used, not arbitrary preferences.
+</Callout>
+
+---
+
+## When to Use Nested Models
+
+✅ **Use nested models when:**
+- Data has a clear hierarchical structure (match → lineup → players)
+- Related fields always appear together (players always have number, name, position)
+- You need validation at multiple levels (player numbers, positions)
+- You want type safety and editor autocomplete
+
+❌ **Keep models flat when:**
+- Fields are truly independent (team name doesn't relate to venue)
+- You'd only nest one level deep with 1-2 fields (just use separate fields)
+- Data structure varies wildly between requests (consider separate models instead)
+
+<Callout type="info" title="Nesting Depth">
+  You can nest as deep as needed, but 2-3 levels is typical. Beyond 4 levels, consider whether you're modeling the right relationships — deeply nested structures can signal that separate API endpoints might be clearer.
 </Callout>
 
 ---
 
 ## The Complete Match Model
 
-Here's what your `Match` model looks like now with all the nested structures:
+Here's what your `Match` model looks like now with nested lineups:
 
 ```python title="matches.py"
 class Match(BaseModel):
@@ -640,64 +577,54 @@ class Match(BaseModel):
     sport: Sport
     status: Status
     winner: Optional[Winner] = None
-    score_home: Optional[int] = Field(None, ge=0)
-    score_away: Optional[int] = Field(None, ge=0)
     
-    # Nested structures
+    # Nested lineup structures
     home_lineup: Optional[List[Player]] = None
     away_lineup: Optional[List[Player]] = None
-    events: List[MatchEvent] = Field(default_factory=list)
-    statistics: Optional[MatchStatistics] = None
+
+    @field_validator('home_team', 'away_team')
+    @classmethod
+    def normalize_team_name(cls, value):
+        return value.strip().lower()
+
+    @field_validator('venue')
+    @classmethod
+    def normalize_venue(cls, value):
+        if value is not None:
+            return value.strip().lower()
+        return value
 ```
 
-Each nested field brings its own validation:
-- `home_lineup` and `away_lineup` — each player's number, name, and position are validated
-- `events` — each event's minute, type, and team are validated
-- `statistics` — possession percentages, shot counts, and the shots-on-target rule are validated
+Each lineup is validated:
+- Must be a list (if provided)
+- Each item must be a `Player`
+- Each player's number, name, and position are validated
 
 And it all happens automatically before your endpoint function runs.
 
 ---
 
-## When to Use Nested Models
-
-✅ **Use nested models when:**
-- Data has a clear hierarchical structure (match → lineup → players)
-- Related fields always appear together (team stats are meaningless without both teams)
-- You need validation at multiple levels (player numbers, event minutes, shot counts)
-- You want type safety and editor autocomplete
-
-❌ **Keep models flat when:**
-- Fields are truly independent (team name doesn't relate to venue)
-- You'd only nest one level deep (just use optional fields)
-- Data structure varies wildly between requests (consider separate models instead)
-
-<Callout type="info" title="Nesting Depth">
-  You can nest as deep as needed, but 2-3 levels is typical. Beyond 4 levels, consider whether you're modeling the right relationships — deeply nested structures can signal that separate API endpoints might be clearer.
-</Callout>
-
----
-
 ## What You've Learned
 
-```python title="Nested model patterns"
-# Pattern 1: Model as a field type
-home_lineup: Optional[List[Player]] = None
+```python title="Nested model pattern"
+# Step 1: Define the nested model
+class Player(BaseModel):
+    number: int = Field(ge=1, le=99)
+    name: str = Field(min_length=2, max_length=50)
+    position: Literal["goalkeeper", "defender", "midfielder", "forward"]
+    is_captain: bool = False
 
-# Pattern 2: Default empty list
-events: List[MatchEvent] = Field(default_factory=list)
-
-# Pattern 3: Model containing models
-class MatchStatistics(BaseModel):
-    home_stats: TeamStats  # Another model
-    away_stats: TeamStats  # Another model
+# Step 2: Use it as a field type
+class Match(BaseModel):
+    # ... other fields ...
+    home_lineup: Optional[List[Player]] = None
 ```
 
-All three patterns:
-- Validate nested data automatically
-- Support model validators at each level
-- Produce clear error paths when validation fails
-- Work with FastAPI's auto-generated docs
+This pattern:
+- Validates nested data automatically
+- Produces clear error paths when validation fails (`["body", "home_lineup", 0, "number"]`)
+- Works with FastAPI's auto-generated docs
+- Provides type safety and autocomplete in your editor
 
 ---
 
@@ -710,6 +637,6 @@ You now have a complete toolkit for validating API inputs:
 - ✅ Model validators with `@model_validator`
 - ✅ Nested models for complex data structures
 
-In the next lesson, we'll improve the API's documentation by adding examples to your models and endpoints, making it easier for API consumers to understand what data your API expects.
+Your `Match` model can now represent not just basic match information, but the full lineup of players for each team. In the next lesson, we'll add examples to your models and endpoints to make your API documentation more helpful for users.
 
 <CopyFinalCode code={_fc} />
