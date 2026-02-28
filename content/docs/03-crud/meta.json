@@ -1,5 +1,10 @@
 {
   "title": "CRUD",
   "description": "Learn FastAPI by building a sports matches API from scratch, starting with strings and progressively adding type safety, validation, and filters.",
-  "pages": ["01-update", "02-response-model", "03-error-handling"]
+  "pages": [
+    "01-update",
+    "02-response-model",
+    "03-error-handling",
+    "04-project-structure"
+  ]
 }
