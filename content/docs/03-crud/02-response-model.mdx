@@ -1,0 +1,974 @@
+---
+title: Error Handling & Status Codes
+description: Replace ad-hoc error dicts with proper HTTP status codes and HTTPException — making your API speak the language clients actually understand.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { CopyFinalCode } from '@/components/copy-final-code';
+
+export const _fc = `from datetime import date as dt_date
+from enum import Enum
+from typing import Annotated, List, Literal, Optional
+
+from fastapi import Body, Depends, FastAPI, HTTPException, Path, status
+from pydantic import BaseModel, Field, computed_field, field_validator, model_validator
+
+app = FastAPI(title="Sports Matches API")
+
+
+class Sport(str, Enum):
+    football = "football"
+    cricket = "cricket"
+    hockey = "hockey"
+    basketball = "basketball"
+    baseball = "baseball"
+
+
+class Status(str, Enum):
+    upcoming = "upcoming"
+    cancelled = "cancelled"
+    abandoned = "abandoned"
+    completed = "completed"
+
+
+class Winner(str, Enum):
+    home_team = "home_team"
+    away_team = "away_team"
+    draw = "draw"
+
+
+class TeamFilter(str, Enum):
+    won = "won"
+    lost = "lost"
+    draw = "draw"
+
+
+class Player(BaseModel):
+    number: int = Field(ge=1, le=99, description="Jersey number", examples=[10])
+    name: str = Field(min_length=2, max_length=50, examples=["Lionel Messi"])
+    position: Literal["goalkeeper", "defender", "midfielder", "forward"] = Field(
+        examples=["forward"]
+    )
+    is_captain: bool = Field(default=False, examples=[True])
+
+
+class Match(BaseModel):
+    id: Optional[int] = None
+    home_team: str = Field(
+        min_length=2, max_length=50, examples=["Arsenal", "Real Madrid"]
+    )
+    away_team: str = Field(
+        min_length=2, max_length=50, examples=["Chelsea", "Barcelona"]
+    )
+    venue: Optional[str] = Field(
+        None,
+        min_length=3,
+        max_length=100,
+        examples=["Emirates Stadium", "Santiago Bernabeu"],
+    )
+    date: dt_date
+    sport: Sport
+    status: Status
+    winner: Optional[Winner] = None
+    home_lineup: Optional[List[Player]] = None
+    away_lineup: Optional[List[Player]] = None
+
+    @field_validator("home_team", "away_team")
+    @classmethod
+    def normalize_team_name(cls, value):
+        return value.strip().lower()
+
+    @field_validator("venue")
+    @classmethod
+    def normalize_venue(cls, value):
+        if value is not None:
+            return value.strip().lower()
+        return value
+
+    @model_validator(mode="after")
+    def validate_match_logic(self):
+        if self.home_team == self.away_team:
+            raise ValueError("home_team and away_team must be different")
+        if self.status == Status.completed:
+            if self.winner is None:
+                raise ValueError("Completed matches must have a winner")
+        if self.status != Status.completed and self.winner is not None:
+            raise ValueError("Only completed matches can have a winner")
+        return self
+
+
+class MatchUpdate(BaseModel):
+    """Model for partial updates to a match. All fields are optional."""
+
+    venue: Optional[str] = Field(
+        None,
+        min_length=3,
+        max_length=100,
+        examples=["Wembley Stadium"],
+    )
+    date: Optional[dt_date] = None
+    status: Optional[Status] = Field(None, examples=["completed"])
+    winner: Optional[Winner] = Field(None, examples=["home_team"])
+    home_lineup: Optional[List[Player]] = None
+    away_lineup: Optional[List[Player]] = None
+
+    @field_validator("venue")
+    @classmethod
+    def normalize_venue(cls, value):
+        if value is not None:
+            return value.strip().lower()
+        return value
+
+    @model_validator(mode="after")
+    def validate_update_logic(self):
+        if self.status == Status.completed and self.winner is None:
+            raise ValueError(
+                "Cannot set status to completed without providing a winner"
+            )
+        if self.status != Status.completed and self.winner is not None:
+            raise ValueError("Cannot set winner for non-completed matches")
+        return self
+
+
+class MatchResponse(BaseModel):
+    id: int
+    home_team: str
+    away_team: str
+    venue: Optional[str] = None
+    date: dt_date
+    sport: Sport
+    status: Status
+    winner: Optional[Winner] = None
+    home_lineup: Optional[List[Player]] = None
+    away_lineup: Optional[List[Player]] = None
+
+
+class MatchListResponse(BaseModel):
+    total: int
+    page: int
+    limit: int
+    matches: List[MatchResponse]
+
+
+class MatchFilters(BaseModel):
+    sport: Optional[Sport] = Field(
+        None,
+        title="Sport Type",
+        description="Filter matches by sport",
+    )
+    status: Optional[Status] = Field(
+        None,
+        title="Match Status",
+        description="Filter by match status",
+    )
+    winner: Optional[Winner] = Field(
+        None,
+        title="Winner",
+        description="Filter by match winner",
+    )
+    team: Optional[str] = Field(
+        None,
+        min_length=3,
+        max_length=50,
+        pattern="^[A-Za-z0-9 ]+$",
+        title="Team Name",
+        description="Filter by team name. Case-insensitive partial match. Letters, numbers and spaces only.",
+        examples=["Arsenal"],
+    )
+    team_filter: Optional[TeamFilter] = Field(
+        None,
+        title="Team Result Filter",
+        description="Filter by how the team performed — won, lost, or draw. Requires team to be set.",
+    )
+
+    @model_validator(mode="after")
+    def validate_winner_and_team_filter(self):
+        if self.team_filter and self.winner:
+            raise ValueError("team_filter and winner cannot be used together")
+        if (self.team_filter or self.winner) and self.status not in (
+            Status.completed,
+            None,
+        ):
+            raise ValueError(
+                "team_filter and winner can only be used when status is 'completed'"
+            )
+        return self
+
+    @field_validator("team")
+    @classmethod
+    def normalize_team(cls, value):
+        if value is not None:
+            return value.strip().lower()
+        return value
+
+
+class DateRangeFilters(BaseModel):
+    from_date: Optional[dt_date] = Field(
+        None,
+        title="Start Date",
+        description="Filter matches on or after this date (YYYY-MM-DD)",
+        examples=["2026-01-01"],
+    )
+    to_date: Optional[dt_date] = Field(
+        None,
+        title="End Date",
+        description="Filter matches on or before this date (YYYY-MM-DD)",
+        examples=["2026-12-31"],
+    )
+
+    @model_validator(mode="after")
+    def validate_date_range(self):
+        if self.from_date and self.to_date:
+            if self.from_date > self.to_date:
+                raise ValueError("from_date must be before or equal to to_date")
+        return self
+
+
+class PaginationParams(BaseModel):
+    page: int = Field(1, ge=1, description="Page number (1-indexed)")
+    limit: int = Field(20, ge=1, le=100, description="Items per page (max 100)")
+
+    @computed_field
+    @property
+    def offset(self) -> int:
+        return (self.page - 1) * self.limit
+
+
+INITIAL_DATA: List[Match] = [
+    Match(
+        id=1,
+        home_team="Arsenal",
+        away_team="Chelsea",
+        sport=Sport.football,
+        date=dt_date(2025, 10, 21),
+        status=Status.completed,
+        winner=Winner.draw,
+        venue="Emirates Stadium",
+    ),
+    Match(
+        id=2,
+        home_team="Lakers",
+        away_team="Warriors",
+        sport=Sport.basketball,
+        date=dt_date(2025, 11, 15),
+        status=Status.completed,
+        winner=Winner.home_team,
+        venue="Crypto.com Arena",
+    ),
+    Match(
+        id=3,
+        home_team="Real Madrid",
+        away_team="Barcelona",
+        sport=Sport.football,
+        date=dt_date(2026, 4, 10),
+        status=Status.completed,
+        winner=Winner.draw,
+        venue="Santiago Bernabeu",
+    ),
+    Match(
+        id=4,
+        home_team="Knicks",
+        away_team="Celtics",
+        sport=Sport.basketball,
+        date=dt_date(2026, 3, 5),
+        status=Status.upcoming,
+        winner=None,
+        venue="Madison Square Garden",
+    ),
+    Match(
+        id=5,
+        home_team="Yankees",
+        away_team="Red Sox",
+        sport=Sport.baseball,
+        date=dt_date(2025, 8, 10),
+        status=Status.abandoned,
+        winner=None,
+        venue="Yankee Stadium",
+    ),
+    Match(
+        id=6,
+        home_team="India",
+        away_team="Pakistan",
+        sport=Sport.cricket,
+        date=dt_date(2026, 3, 24),
+        status=Status.completed,
+        winner=Winner.home_team,
+        venue="Narendra Modi Stadium",
+    ),
+    Match(
+        id=7,
+        home_team="Lakers",
+        away_team="Warriors",
+        sport=Sport.basketball,
+        date=dt_date(2025, 1, 15),
+        status=Status.completed,
+        winner=Winner.away_team,
+        venue="Crypto.com Arena",
+    ),
+]
+
+
+class SortParams(BaseModel):
+    sort_by: Optional[Literal["date", "sport", "status"]] = Field(
+        None,
+        title="Sort By",
+        description="Field to sort results by",
+    )
+    sort_order: Literal["asc", "desc"] = Field(
+        "asc",
+        title="Sort Order",
+        description="Sort direction — asc for ascending, desc for descending",
+    )
+
+
+@app.get("/health", tags=["System"])
+def health_check():
+    return {"status": "ok"}
+
+
+@app.get("/matches", response_model=MatchListResponse, response_model_exclude_none=True, tags=["Matches"])
+def list_matches(
+    filters: Annotated[MatchFilters, Depends()],
+    date_range: Annotated[DateRangeFilters, Depends()],
+    pagination: Annotated[PaginationParams, Depends()],
+    sort_params: Annotated[SortParams, Depends()],
+):
+    results = INITIAL_DATA
+
+    if filters.sport:
+        results = [m for m in results if m.sport == filters.sport]
+
+    if filters.status:
+        results = [m for m in results if m.status == filters.status]
+
+    if filters.winner:
+        results = [m for m in results if m.winner == filters.winner]
+
+    if filters.team:
+        normalized_team = filters.team.strip().lower()
+        results = [
+            m
+            for m in results
+            if normalized_team in m.home_team or normalized_team in m.away_team
+        ]
+
+    if filters.team_filter and filters.team:
+        normalized_team = filters.team.strip().lower()
+        if filters.team_filter == TeamFilter.won:
+            results = [
+                m
+                for m in results
+                if (m.winner == Winner.home_team and normalized_team in m.home_team)
+                or (m.winner == Winner.away_team and normalized_team in m.away_team)
+            ]
+        elif filters.team_filter == TeamFilter.lost:
+            results = [
+                m
+                for m in results
+                if (m.winner == Winner.away_team and normalized_team in m.home_team)
+                or (m.winner == Winner.home_team and normalized_team in m.away_team)
+            ]
+        elif filters.team_filter == TeamFilter.draw:
+            results = [
+                m
+                for m in results
+                if m.winner == Winner.draw
+                and (normalized_team in m.home_team or normalized_team in m.away_team)
+            ]
+
+    if date_range.from_date:
+        results = [m for m in results if m.date >= date_range.from_date]
+
+    if date_range.to_date:
+        results = [m for m in results if m.date <= date_range.to_date]
+
+    if sort_params.sort_by:
+        reverse = sort_params.sort_order == "desc"
+        results = sorted(
+            results, key=lambda m: getattr(m, sort_params.sort_by), reverse=reverse
+        )
+
+    total = len(results)
+    results = results[pagination.offset : pagination.offset + pagination.limit]
+
+    return {
+        "total": total,
+        "page": pagination.page,
+        "limit": pagination.limit,
+        "matches": results,
+    }
+
+
+@app.get("/matches/{match_id}", response_model=MatchResponse, response_model_exclude_none=True, tags=["Matches"])
+def get_match(match_id: Annotated[int, Path(ge=1, title="Match ID")]):
+    for match in INITIAL_DATA:
+        if match.id == match_id:
+            return match
+    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Match not found")
+
+
+@app.post("/matches", response_model=MatchResponse, response_model_exclude_none=True, status_code=status.HTTP_201_CREATED, tags=["Matches"])
+def create_match(
+    match: Annotated[
+        Match,
+        Body(
+            openapi_examples={
+                "basic": {
+                    "summary": "Basic upcoming match",
+                    "description": "Minimal required fields for creating a new match",
+                    "value": {
+                        "home_team": "Arsenal",
+                        "away_team": "Chelsea",
+                        "sport": "football",
+                        "date": "2026-03-15",
+                        "status": "upcoming",
+                        "venue": "Emirates Stadium",
+                    },
+                },
+                "completed": {
+                    "summary": "Completed match",
+                    "description": "A finished match with a winner",
+                    "value": {
+                        "home_team": "Real Madrid",
+                        "away_team": "Barcelona",
+                        "sport": "football",
+                        "date": "2025-10-26",
+                        "status": "completed",
+                        "venue": "Santiago Bernabeu",
+                        "winner": "home_team",
+                    },
+                },
+                "with_lineup": {
+                    "summary": "Match with player lineup",
+                    "description": "Include starting lineups for both teams",
+                    "value": {
+                        "home_team": "Arsenal",
+                        "away_team": "Chelsea",
+                        "sport": "football",
+                        "date": "2026-03-15",
+                        "status": "upcoming",
+                        "venue": "Emirates Stadium",
+                        "home_lineup": [
+                            {
+                                "number": 1,
+                                "name": "Aaron Ramsdale",
+                                "position": "goalkeeper",
+                                "is_captain": False,
+                            },
+                            {
+                                "number": 10,
+                                "name": "Martin Odegaard",
+                                "position": "midfielder",
+                                "is_captain": True,
+                            },
+                        ],
+                        "away_lineup": [
+                            {
+                                "number": 1,
+                                "name": "Kepa Arrizabalaga",
+                                "position": "goalkeeper",
+                                "is_captain": False,
+                            }
+                        ],
+                    },
+                },
+            }
+        ),
+    ],
+):
+    if match.status is Status.upcoming and match.date < dt_date.today():
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Upcoming match date cannot be in the past",
+        )
+    match.id = INITIAL_DATA[-1].id + 1
+    INITIAL_DATA.append(match)
+    return match
+
+
+@app.patch("/matches/{match_id}", response_model=MatchResponse, response_model_exclude_none=True, tags=["Matches"])
+def update_match(
+    match_id: Annotated[int, Path(ge=1, title="Match ID")],
+    update: Annotated[
+        MatchUpdate,
+        Body(
+            openapi_examples={
+                "update_venue": {
+                    "summary": "Update venue only",
+                    "description": "Change the match venue without affecting other fields",
+                    "value": {"venue": "Wembley Stadium"},
+                },
+                "record_result": {
+                    "summary": "Record match result",
+                    "description": "Update a match with completion status and winner",
+                    "value": {
+                        "status": "completed",
+                        "winner": "home_team",
+                    },
+                },
+                "reschedule_match": {
+                    "summary": "Reschedule match date",
+                    "description": "Change the date and venue for an upcoming match",
+                    "value": {
+                        "date": "2026-06-15",
+                        "venue": "Etihad Stadium",
+                    },
+                },
+                "add_lineup": {
+                    "summary": "Add team lineup",
+                    "description": "Add starting lineup before match",
+                    "value": {
+                        "home_lineup": [
+                            {
+                                "number": 1,
+                                "name": "Aaron Ramsdale",
+                                "position": "goalkeeper",
+                                "is_captain": False,
+                            },
+                            {
+                                "number": 10,
+                                "name": "Martin Odegaard",
+                                "position": "midfielder",
+                                "is_captain": True,
+                            },
+                        ]
+                    },
+                },
+            }
+        ),
+    ],
+):
+    for i, match in enumerate(INITIAL_DATA):
+        if match.id == match_id:
+            stored_match_data = match.model_dump()
+            update_data = update.model_dump(exclude_unset=True)
+            updated_match_dict = {**stored_match_data, **update_data}
+
+            try:
+                validated_match = Match.model_validate(updated_match_dict)
+            except ValueError as e:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=str(e),
+                )
+
+            INITIAL_DATA[i] = validated_match
+            return validated_match
+
+    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Match not found")
+
+
+@app.put("/matches/{match_id}", response_model=MatchResponse, response_model_exclude_none=True, tags=["Matches"])
+def replace_match(
+    match_id: Annotated[int, Path(ge=1, title="Match ID")],
+    match: Annotated[
+        Match,
+        Body(
+            openapi_examples={
+                "replace_upcoming": {
+                    "summary": "Replace with upcoming match",
+                    "description": "Completely replace match data with new upcoming match details",
+                    "value": {
+                        "home_team": "Manchester City",
+                        "away_team": "Tottenham",
+                        "sport": "football",
+                        "date": "2026-05-20",
+                        "status": "upcoming",
+                        "venue": "Etihad Stadium",
+                    },
+                },
+                "replace_completed": {
+                    "summary": "Replace with completed match",
+                    "description": "Replace entire match with completed match data including winner",
+                    "value": {
+                        "home_team": "Arsenal",
+                        "away_team": "Chelsea",
+                        "sport": "football",
+                        "date": "2026-05-15",
+                        "status": "completed",
+                        "venue": "Wembley Stadium",
+                        "winner": "home_team",
+                    },
+                },
+            }
+        ),
+    ],
+):
+    for i, existing_match in enumerate(INITIAL_DATA):
+        if existing_match.id == match_id:
+            match.id = match_id
+            INITIAL_DATA[i] = match
+            return match
+
+    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Match not found")
+
+
+@app.delete("/matches/{match_id}", response_model=MatchResponse, response_model_exclude_none=True, tags=["Matches"])
+def delete_match(match_id: Annotated[int, Path(ge=1, title="Match ID")]):
+    for i, match in enumerate(INITIAL_DATA):
+        if match.id == match_id:
+            deleted_match = INITIAL_DATA.pop(i)
+            return deleted_match
+
+    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Match not found")
+`
+
+In the last chapter you added `response_model` to every endpoint — your API now sends clean, predictable JSON. But there's still one big rough edge. Look at what happens when you request a match that doesn't exist:
+
+```bash
+GET /matches/999
+```
+
+```json title="Current response — wrong in two ways"
+{
+  "error": "Match not found"
+}
+```
+
+The problem is **not** the message. The problem is the status code. This response comes back with HTTP **200 OK** — meaning "success." The client thinks the request worked fine and received valid match data, then has to inspect the body to discover the error. That's not how HTTP is supposed to work.
+
+HTTP has an entire vocabulary of status codes specifically designed to communicate what happened. A missing resource should be **404 Not Found**. A newly created resource should be **201 Created**. A validation failure should be **422 Unprocessable Entity**. Every HTTP client, every browser, every monitoring tool, every frontend framework understands these codes — and relies on them.
+
+By the end of this chapter you'll have:
+- Replaced all `return {"error": "..."}, 404` patterns with proper `HTTPException`
+- Added correct status codes to every endpoint
+- Imported and used FastAPI's `status` module for readable, self-documenting code
+
+---
+
+## HTTP Status Codes — A Quick Reference
+
+You don't need to memorise hundreds of codes. Here are the ones relevant to a CRUD API:
+
+| Code | Name | When to use |
+|------|------|-------------|
+| `200` | OK | Default for GET, PATCH, PUT, DELETE — request succeeded |
+| `201` | Created | Resource was successfully created (POST) |
+| `204` | No Content | Success but nothing to return (sometimes used for DELETE) |
+| `400` | Bad Request | The request is malformed or makes no logical sense |
+| `404` | Not Found | The requested resource doesn't exist |
+| `422` | Unprocessable Entity | The request is well-formed but fails business logic validation |
+
+The distinction between `400` and `422` trips up beginners. Here's a simple way to think about it:
+- `400` — "I can't even understand this request" (e.g. malformed JSON, completely wrong shape)
+- `422` — "I understand the request, but the data fails validation" (e.g. upcoming match with a past date, completed match without a winner)
+
+FastAPI already uses `422` automatically for Pydantic validation errors. You should use it too when your own business logic rejects valid-but-wrong data.
+
+---
+
+## The Problem with Returning Error Dicts
+
+Currently the code handles "not found" like this in several places:
+
+```python
+# ❌ Current approach — wrong status code
+return {"error": "Match not found"}, 404
+```
+
+This is a Python tuple being returned from a FastAPI route. FastAPI does pick up the `404` status code from the tuple — so the status code is technically right. But there are two problems:
+
+**Problem 1 — It bypasses `response_model`.**
+Remember the `response_model=MatchResponse` set on these endpoints? When you return this error dict, FastAPI tries to validate it against `MatchResponse` and either fails silently or raises an internal error, because `{"error": "Match not found"}` is not a valid `MatchResponse`. The behaviour is undefined and fragile.
+
+**Problem 2 — The error shape is inconsistent.**
+Returning raw dicts means every error in your codebase can look different. Some might use `"error"`, others `"message"`, others `"detail"`. Clients can't reliably parse your errors.
+
+`HTTPException` solves both problems cleanly.
+
+---
+
+## Step 1 — Import `HTTPException` and `status`
+
+Add two new imports:
+
+```python title="matches.py"
+# Before
+from fastapi import Body, Depends, FastAPI, Path
+
+# After
+from fastapi import Body, Depends, FastAPI, HTTPException, Path, status
+```
+
+`HTTPException` is how you signal errors in FastAPI. `status` is a module containing named constants for every HTTP status code — `status.HTTP_404_NOT_FOUND`, `status.HTTP_201_CREATED`, and so on.
+
+### Why use `status.HTTP_404_NOT_FOUND` instead of just `404`?
+
+Both work. But the named constant is better for two reasons:
+
+```python
+# ❌ Magic number — what does 404 mean again?
+raise HTTPException(status_code=404, detail="Match not found")
+
+# ✅ Self-documenting — instantly clear
+raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Match not found")
+```
+
+The named constant also makes typos obvious at a glance. `status.HTTP_40_NOT_FOUND` causes an `AttributeError` immediately. `staus_code=40` silently sends a weird response that's hard to debug.
+
+---
+
+## Step 2 — Replace Error Returns with `HTTPException`
+
+`HTTPException` is raised, not returned. That's the key difference — `raise` immediately stops the function and sends the error response. `return` keeps executing and can cause issues if there's code after it.
+
+Go through every endpoint and replace the tuple-return pattern:
+
+```python title="Before — in get_match, update_match, replace_match, delete_match"
+return {"error": "Match not found"}, 404
+```
+
+```python title="After"
+raise HTTPException(
+    status_code=status.HTTP_404_NOT_FOUND,
+    detail="Match not found"
+)
+```
+
+FastAPI handles the rest. When you raise `HTTPException`, FastAPI automatically:
+- Sets the HTTP status code to whatever you passed
+- Wraps `detail` in a consistent JSON shape: `{"detail": "Match not found"}`
+- Skips `response_model` filtering (error responses aren't match data)
+
+The `{"detail": "..."}` shape is FastAPI's standard error format. It's the same format that Pydantic validation errors use, so all your errors now look consistent.
+
+Let's update every endpoint:
+
+### `get_match`
+
+```python title="matches.py"
+@app.get("/matches/{match_id}", response_model=MatchResponse, response_model_exclude_none=True, tags=["Matches"])
+def get_match(match_id: Annotated[int, Path(ge=1, title="Match ID")]):
+    for match in INITIAL_DATA:
+        if match.id == match_id:
+            return match
+    raise HTTPException(  # !mark
+        status_code=status.HTTP_404_NOT_FOUND,  # !mark
+        detail="Match not found"  # !mark
+    )  # !mark
+```
+
+### `update_match` (PATCH)
+
+Replace both error returns — the "not found" case and the validation failure case:
+
+```python title="matches.py"
+@app.patch("/matches/{match_id}", response_model=MatchResponse, response_model_exclude_none=True, tags=["Matches"])
+def update_match(match_id, update):
+    for i, match in enumerate(INITIAL_DATA):
+        if match.id == match_id:
+            stored_match_data = match.model_dump()
+            update_data = update.model_dump(exclude_unset=True)
+            updated_match_dict = {**stored_match_data, **update_data}
+
+            try:
+                validated_match = Match.model_validate(updated_match_dict)
+            except ValueError as e:
+                raise HTTPException(  # !mark
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,  # !mark
+                    detail=str(e),  # !mark
+                )  # !mark
+
+            INITIAL_DATA[i] = validated_match
+            return validated_match
+
+    raise HTTPException(  # !mark
+        status_code=status.HTTP_404_NOT_FOUND,  # !mark
+        detail="Match not found"  # !mark
+    )  # !mark
+```
+
+Notice the validation failure uses `422` (`UNPROCESSABLE_ENTITY`), not `400`. The data came in correctly shaped — it was valid JSON, a valid `MatchUpdate` object — but the *resulting match state* would be logically invalid. That's exactly what `422` is for.
+
+### `replace_match` (PUT)
+
+```python title="matches.py"
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail="Match not found"
+    )
+```
+
+### `delete_match`
+
+```python title="matches.py"
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail="Match not found"
+    )
+```
+
+---
+
+## Step 3 — Add `status_code` to POST (201 Created)
+
+Right now `POST /matches` returns `200 OK` on success. That's technically not wrong, but it's imprecise. The correct code for "a new resource was created" is `201 Created`.
+
+Add `status_code` to the POST decorator:
+
+```python title="matches.py"
+@app.post(
+    "/matches",
+    response_model=MatchResponse,
+    response_model_exclude_none=True,
+    status_code=status.HTTP_201_CREATED,  # !mark
+    tags=["Matches"],
+)
+def create_match(...):
+```
+
+`status_code` on the decorator sets the default success status for that endpoint. When the function returns normally, FastAPI uses this code. `HTTPException` overrides it when something goes wrong.
+
+### Also clean up `create_match`'s validation errors
+
+The `create_match` function has some leftover manual validation checks that predate Pydantic validators. Most of them duplicate what `Match`'s `model_validator` already does — but the date check is genuinely business logic (not a schema rule), so keep it and turn it into a proper `HTTPException`:
+
+```python title="matches.py — create_match body"
+def create_match(match: ...):
+    if match.status is Status.upcoming and match.date < dt_date.today():
+        raise HTTPException(  # !mark
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,  # !mark
+            detail="Upcoming match date cannot be in the past",  # !mark
+        )  # !mark
+    match.id = INITIAL_DATA[-1].id + 1
+    INITIAL_DATA.append(match)
+    return match
+```
+
+The other manual checks (`home_team == away_team`, `winner without completed status`, etc.) are already caught by `Match`'s `model_validator` before the function body even runs. FastAPI raises a `422` for those automatically, so the redundant manual checks can be removed.
+
+<Callout type="info" title="Pydantic validation errors vs HTTPException">
+  When Pydantic validation fails on request body parsing — before your function runs — FastAPI automatically returns a `422` with a detailed breakdown of every failing field. You don't control this; FastAPI handles it.
+
+  `HTTPException` is for errors you raise yourself, after Pydantic has already accepted the data. They serve different purposes but both result in non-200 responses.
+</Callout>
+
+---
+
+## Step 4 — What About `GET /matches`?
+
+The list endpoint has no "not found" case — if there are no results, it just returns an empty list with `total: 0`. That's correct behaviour. An empty list is a valid successful response, not an error.
+
+```json title="GET /matches?sport=baseball&status=upcoming — no results"
+{
+  "total": 0,
+  "page": 1,
+  "limit": 20,
+  "matches": []
+}
+```
+
+This returns `200 OK` with an empty list, which is exactly right. No changes needed.
+
+---
+
+## Step 5 — What the Errors Look Like Now
+
+Before this chapter, every error looked different. After, they're consistent:
+
+```json title="GET /matches/999 — 404 Not Found"
+{
+  "detail": "Match not found"
+}
+```
+
+```json title="PATCH /matches/4 with {\"status\": \"completed\"} — 422"
+{
+  "detail": "1 validation error for Match\n  Value error, Completed matches must have a winner"
+}
+```
+
+```json title="POST /matches with a past date for upcoming — 422"
+{
+  "detail": "Upcoming match date cannot be in the past"
+}
+```
+
+```json title="POST /matches with invalid body (Pydantic error) — 422"
+{
+  "detail": [
+    {
+      "type": "missing",
+      "loc": ["body", "home_team"],
+      "msg": "Field required",
+      "input": {}
+    }
+  ]
+}
+```
+
+Notice that Pydantic's automatic `422` (the last example) has a richer `detail` — it's a list with field-level information. Your manual `HTTPException` raises have a simple string `detail`. Both are valid; FastAPI allows `detail` to be either a string or a more complex object.
+
+---
+
+## What `raise` vs `return` Means for Errors
+
+This is worth making explicit because it's a pattern you'll use constantly:
+
+```python
+def get_match(match_id):
+    for match in INITIAL_DATA:
+        if match.id == match_id:
+            return match              # ← success path: return the data
+
+    raise HTTPException(              # ← error path: raise an exception
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail="Match not found"
+    )
+    # Nothing after raise ever runs
+```
+
+`raise` works like `return` in one important way — it immediately exits the function. But unlike `return`, it signals to FastAPI that something went wrong and the normal response pipeline (including `response_model`) should be skipped. FastAPI catches the `HTTPException` and turns it into the error response automatically.
+
+A useful mental model: **`return` is for success, `raise` is for failure.**
+
+---
+
+## The Complete Status Code Picture
+
+Here's every endpoint with its final status codes:
+
+| Endpoint | Success code | Error codes |
+|----------|-------------|-------------|
+| `GET /matches` | `200 OK` | — |
+| `GET /matches/{id}` | `200 OK` | `404` match not found |
+| `POST /matches` | `201 Created` | `422` date in past |
+| `PATCH /matches/{id}` | `200 OK` | `404` not found, `422` invalid resulting state |
+| `PUT /matches/{id}` | `200 OK` | `404` not found |
+| `DELETE /matches/{id}` | `200 OK` | `404` not found |
+
+<Callout type="info" title="Why not 204 for DELETE?">
+  `204 No Content` is also valid for DELETE — it says "success, and here's nothing." We're using `200` and returning the deleted match because it's useful for the client to confirm what was deleted. Both are correct; it depends on your API design preference. If you later decide not to return the deleted resource, change the status to `204` and remove `response_model`.
+</Callout>
+
+---
+
+## Swagger UI Shows Your Status Codes
+
+Open `/docs` and click on any endpoint. In the **Responses** section you'll now see accurate documentation:
+
+- `POST /matches` shows `201` as the success response (not `200`)
+- All endpoints show `422` for validation errors (FastAPI adds this automatically)
+- The response schemas are shown for each code
+
+This is one of the real benefits of using `HTTPException` and `status_code` — the documentation reflects what your API actually does.
+
+---
+
+## What You've Learned
+
+- **HTTP status codes** — `200` success, `201` created, `404` not found, `422` unprocessable entity, and when to use each
+- **`HTTPException`** — FastAPI's way to signal errors; `raise` it instead of returning error dicts
+- **`status` module** — named constants like `status.HTTP_404_NOT_FOUND` instead of magic numbers
+- **`raise` vs `return`** — `return` for success, `raise` for failure; `raise` skips `response_model` and exits immediately
+- **`status_code=` on the decorator** — sets the default success code for an endpoint (used for `201` on POST)
+- **Consistent error shape** — `HTTPException` always produces `{"detail": "..."}`, making errors predictable for clients
+- **400 vs 422** — `400` for malformed requests, `422` for valid-but-logically-wrong data
+
+---
+
+## What's Next
+
+Your API now has accurate status codes, clean responses, and consistent errors. The next step is authentication — making sure only the right people can call your endpoints.
+
+<CopyFinalCode code={_fc} />

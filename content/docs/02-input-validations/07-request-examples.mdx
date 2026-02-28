@@ -66,7 +66,7 @@ class Match(BaseModel):
         max_length=100,
         examples=["Emirates Stadium", "Santiago Bernabeu"],
     )
-    date: date = Field(examples=["2026-03-15"])
+    date: date
     sport: Sport
     status: Status
     winner: Optional[Winner] = None
