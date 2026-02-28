@@ -1,0 +1,876 @@
+---
+title: Dependencies — Classes and Sub-dependencies
+description: Discover that you've been using class-based dependencies all along. Learn how Pydantic models work as dependencies, how to build dependencies that depend on other dependencies, and why FastAPI only calls each dependency once.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Tab, Tabs } from 'fumadocs-ui/components/tabs';
+import { CopyFinalCode } from '@/components/copy-final-code';
+
+export const _models = `from datetime import date as dt_date
+from enum import Enum
+from typing import List, Literal, Optional
+
+from pydantic import BaseModel, Field, computed_field, field_validator, model_validator
+
+
+class Sport(str, Enum):
+    football = "football"
+    cricket = "cricket"
+    hockey = "hockey"
+    basketball = "basketball"
+    baseball = "baseball"
+
+
+class Status(str, Enum):
+    upcoming = "upcoming"
+    cancelled = "cancelled"
+    abandoned = "abandoned"
+    completed = "completed"
+
+
+class Winner(str, Enum):
+    home_team = "home_team"
+    away_team = "away_team"
+    draw = "draw"
+
+
+class TeamFilter(str, Enum):
+    won = "won"
+    lost = "lost"
+    draw = "draw"
+
+
+class Player(BaseModel):
+    number: int = Field(ge=1, le=99, description="Jersey number", examples=[10])
+    name: str = Field(min_length=2, max_length=50, examples=["Lionel Messi"])
+    position: Literal["goalkeeper", "defender", "midfielder", "forward"] = Field(
+        examples=["forward"]
+    )
+    is_captain: bool = Field(default=False, examples=[True])
+
+
+class Match(BaseModel):
+    id: Optional[int] = None
+    home_team: str = Field(
+        min_length=2, max_length=50, examples=["Arsenal", "Real Madrid"]
+    )
+    away_team: str = Field(
+        min_length=2, max_length=50, examples=["Chelsea", "Barcelona"]
+    )
+    venue: Optional[str] = Field(
+        None,
+        min_length=3,
+        max_length=100,
+        examples=["Emirates Stadium", "Santiago Bernabeu"],
+    )
+    date: dt_date
+    sport: Sport
+    status: Status
+    winner: Optional[Winner] = None
+    home_lineup: Optional[List[Player]] = None
+    away_lineup: Optional[List[Player]] = None
+
+    @field_validator("home_team", "away_team")
+    @classmethod
+    def normalize_team_name(cls, value):
+        return value.strip().lower()
+
+    @field_validator("venue")
+    @classmethod
+    def normalize_venue(cls, value):
+        if value is not None:
+            return value.strip().lower()
+        return value
+
+    @model_validator(mode="after")
+    def validate_match_logic(self):
+        if self.home_team == self.away_team:
+            raise ValueError("home_team and away_team must be different")
+        if self.status == Status.completed:
+            if self.winner is None:
+                raise ValueError("Completed matches must have a winner")
+        if self.status != Status.completed and self.winner is not None:
+            raise ValueError("Only completed matches can have a winner")
+        return self
+
+
+class MatchUpdate(BaseModel):
+    """Model for partial updates to a match. All fields are optional."""
+
+    venue: Optional[str] = Field(
+        None,
+        min_length=3,
+        max_length=100,
+        examples=["Wembley Stadium"],
+    )
+    date: Optional[dt_date] = None
+    status: Optional[Status] = Field(None, examples=["completed"])
+    winner: Optional[Winner] = Field(None, examples=["home_team"])
+    home_lineup: Optional[List[Player]] = None
+    away_lineup: Optional[List[Player]] = None
+
+    @field_validator("venue")
+    @classmethod
+    def normalize_venue(cls, value):
+        if value is not None:
+            return value.strip().lower()
+        return value
+
+    @model_validator(mode="after")
+    def validate_update_logic(self):
+        if self.status == Status.completed and self.winner is None:
+            raise ValueError(
+                "Cannot set status to completed without providing a winner"
+            )
+        if self.status != Status.completed and self.winner is not None:
+            raise ValueError("Cannot set winner for non-completed matches")
+        return self
+
+
+class MatchResponse(BaseModel):
+    id: int
+    home_team: str
+    away_team: str
+    venue: Optional[str] = None
+    date: dt_date
+    sport: Sport
+    status: Status
+    winner: Optional[Winner] = None
+    home_lineup: Optional[List[Player]] = None
+    away_lineup: Optional[List[Player]] = None
+
+
+class MatchListResponse(BaseModel):
+    total: int
+    page: int
+    limit: int
+    matches: List[MatchResponse]
+
+
+class MatchFilters(BaseModel):
+    sport: Optional[Sport] = Field(
+        None,
+        title="Sport Type",
+        description="Filter matches by sport",
+    )
+    status: Optional[Status] = Field(
+        None,
+        title="Match Status",
+        description="Filter by match status",
+    )
+    winner: Optional[Winner] = Field(
+        None,
+        title="Winner",
+        description="Filter by match winner",
+    )
+    team: Optional[str] = Field(
+        None,
+        min_length=3,
+        max_length=50,
+        pattern="^[A-Za-z0-9 ]+$",
+        title="Team Name",
+        description="Filter by team name. Case-insensitive partial match. Letters, numbers and spaces only.",
+        examples=["Arsenal"],
+    )
+    team_filter: Optional[TeamFilter] = Field(
+        None,
+        title="Team Result Filter",
+        description="Filter by how the team performed — won, lost, or draw. Requires team to be set.",
+    )
+
+    @model_validator(mode="after")
+    def validate_winner_and_team_filter(self):
+        if self.team_filter and self.winner:
+            raise ValueError("team_filter and winner cannot be used together")
+        if (self.team_filter or self.winner) and self.status not in (
+            Status.completed,
+            None,
+        ):
+            raise ValueError(
+                "team_filter and winner can only be used when status is 'completed'"
+            )
+        return self
+
+    @field_validator("team")
+    @classmethod
+    def normalize_team(cls, value):
+        if value is not None:
+            return value.strip().lower()
+        return value
+
+
+class DateRangeFilters(BaseModel):
+    from_date: Optional[dt_date] = Field(
+        None,
+        title="Start Date",
+        description="Filter matches on or after this date (YYYY-MM-DD)",
+        examples=["2026-01-01"],
+    )
+    to_date: Optional[dt_date] = Field(
+        None,
+        title="End Date",
+        description="Filter matches on or before this date (YYYY-MM-DD)",
+        examples=["2026-12-31"],
+    )
+
+    @model_validator(mode="after")
+    def validate_date_range(self):
+        if self.from_date and self.to_date:
+            if self.from_date > self.to_date:
+                raise ValueError("from_date must be before or equal to to_date")
+        return self
+
+
+class PaginationParams(BaseModel):
+    page: int = Field(1, ge=1, description="Page number (1-indexed)")
+    limit: int = Field(20, ge=1, le=100, description="Items per page (max 100)")
+
+    @computed_field
+    @property
+    def offset(self) -> int:
+        return (self.page - 1) * self.limit
+
+
+class SortParams(BaseModel):
+    sort_by: Optional[Literal["date", "sport", "status"]] = Field(
+        None,
+        title="Sort By",
+        description="Field to sort results by",
+    )
+    sort_order: Literal["asc", "desc"] = Field(
+        "asc",
+        title="Sort Order",
+        description="Sort direction — asc for ascending, desc for descending",
+    )
+
+
+class QueryBundle(BaseModel):
+    """Combines all query concerns into a single injectable dependency."""
+
+    model_config = {"arbitrary_types_allowed": True}
+
+    filters: MatchFilters
+    date_range: DateRangeFilters
+    pagination: PaginationParams
+    sort_params: SortParams
+`
+
+export const _routes = `from datetime import date as dt_date
+from typing import Annotated, List
+
+from fastapi import APIRouter, Body, Depends, HTTPException, Path, status
+
+from app.database import INITIAL_DATA
+from app.models import (
+    DateRangeFilters,
+    Match,
+    MatchFilters,
+    MatchListResponse,
+    MatchResponse,
+    MatchUpdate,
+    PaginationParams,
+    QueryBundle,
+    SortParams,
+    Status,
+    TeamFilter,
+    Winner,
+)
+
+router = APIRouter(prefix="/matches", tags=["Matches"])
+
+
+def get_match_or_404(match_id: Annotated[int, Path(ge=1, title="Match ID")]) -> Match:
+    for match in INITIAL_DATA:
+        if match.id == match_id:
+            return match
+    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Match not found")
+
+
+def get_query_bundle(
+    filters: Annotated[MatchFilters, Depends()],
+    date_range: Annotated[DateRangeFilters, Depends()],
+    pagination: Annotated[PaginationParams, Depends()],
+    sort_params: Annotated[SortParams, Depends()],
+) -> QueryBundle:
+    return QueryBundle(
+        filters=filters,
+        date_range=date_range,
+        pagination=pagination,
+        sort_params=sort_params,
+    )
+
+
+@router.get("", response_model=MatchListResponse, response_model_exclude_none=True)
+def list_matches(q: Annotated[QueryBundle, Depends(get_query_bundle)]):
+    results = INITIAL_DATA
+
+    if q.filters.sport:
+        results = [m for m in results if m.sport == q.filters.sport]
+
+    if q.filters.status:
+        results = [m for m in results if m.status == q.filters.status]
+
+    if q.filters.winner:
+        results = [m for m in results if m.winner == q.filters.winner]
+
+    if q.filters.team:
+        normalized_team = q.filters.team.strip().lower()
+        results = [
+            m
+            for m in results
+            if normalized_team in m.home_team or normalized_team in m.away_team
+        ]
+
+    if q.filters.team_filter and q.filters.team:
+        normalized_team = q.filters.team.strip().lower()
+        if q.filters.team_filter == TeamFilter.won:
+            results = [
+                m
+                for m in results
+                if (m.winner == Winner.home_team and normalized_team in m.home_team)
+                or (m.winner == Winner.away_team and normalized_team in m.away_team)
+            ]
+        elif q.filters.team_filter == TeamFilter.lost:
+            results = [
+                m
+                for m in results
+                if (m.winner == Winner.away_team and normalized_team in m.home_team)
+                or (m.winner == Winner.home_team and normalized_team in m.away_team)
+            ]
+        elif q.filters.team_filter == TeamFilter.draw:
+            results = [
+                m
+                for m in results
+                if m.winner == Winner.draw
+                and (normalized_team in m.home_team or normalized_team in m.away_team)
+            ]
+
+    if q.date_range.from_date:
+        results = [m for m in results if m.date >= q.date_range.from_date]
+
+    if q.date_range.to_date:
+        results = [m for m in results if m.date <= q.date_range.to_date]
+
+    if q.sort_params.sort_by:
+        reverse = q.sort_params.sort_order == "desc"
+        results = sorted(
+            results, key=lambda m: getattr(m, q.sort_params.sort_by), reverse=reverse
+        )
+
+    total = len(results)
+    results = results[q.pagination.offset : q.pagination.offset + q.pagination.limit]
+
+    return {
+        "total": total,
+        "page": q.pagination.page,
+        "limit": q.pagination.limit,
+        "matches": results,
+    }
+
+
+@router.get("/{match_id}", response_model=MatchResponse, response_model_exclude_none=True)
+def get_match(match: Annotated[Match, Depends(get_match_or_404)]):
+    return match
+
+
+@router.post("", response_model=MatchResponse, response_model_exclude_none=True, status_code=status.HTTP_201_CREATED)
+def create_match(
+    match: Annotated[
+        Match,
+        Body(
+            openapi_examples={
+                "basic": {
+                    "summary": "Basic upcoming match",
+                    "description": "Minimal required fields for creating a new match",
+                    "value": {
+                        "home_team": "Arsenal",
+                        "away_team": "Chelsea",
+                        "sport": "football",
+                        "date": "2026-03-15",
+                        "status": "upcoming",
+                        "venue": "Emirates Stadium",
+                    },
+                },
+                "completed": {
+                    "summary": "Completed match",
+                    "description": "A finished match with a winner",
+                    "value": {
+                        "home_team": "Real Madrid",
+                        "away_team": "Barcelona",
+                        "sport": "football",
+                        "date": "2025-10-26",
+                        "status": "completed",
+                        "venue": "Santiago Bernabeu",
+                        "winner": "home_team",
+                    },
+                },
+                "with_lineup": {
+                    "summary": "Match with player lineup",
+                    "description": "Include starting lineups for both teams",
+                    "value": {
+                        "home_team": "Arsenal",
+                        "away_team": "Chelsea",
+                        "sport": "football",
+                        "date": "2026-03-15",
+                        "status": "upcoming",
+                        "venue": "Emirates Stadium",
+                        "home_lineup": [
+                            {
+                                "number": 1,
+                                "name": "Aaron Ramsdale",
+                                "position": "goalkeeper",
+                                "is_captain": False,
+                            },
+                            {
+                                "number": 10,
+                                "name": "Martin Odegaard",
+                                "position": "midfielder",
+                                "is_captain": True,
+                            },
+                        ],
+                        "away_lineup": [
+                            {
+                                "number": 1,
+                                "name": "Kepa Arrizabalaga",
+                                "position": "goalkeeper",
+                                "is_captain": False,
+                            }
+                        ],
+                    },
+                },
+            }
+        ),
+    ],
+):
+    if match.status is Status.upcoming and match.date < dt_date.today():
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Upcoming match date cannot be in the past",
+        )
+    match.id = INITIAL_DATA[-1].id + 1
+    INITIAL_DATA.append(match)
+    return match
+
+
+@router.patch("/{match_id}", response_model=MatchResponse, response_model_exclude_none=True)
+def update_match(
+    match: Annotated[Match, Depends(get_match_or_404)],
+    update: Annotated[
+        MatchUpdate,
+        Body(
+            openapi_examples={
+                "update_venue": {
+                    "summary": "Update venue only",
+                    "description": "Change the match venue without affecting other fields",
+                    "value": {"venue": "Wembley Stadium"},
+                },
+                "record_result": {
+                    "summary": "Record match result",
+                    "description": "Update a match with completion status and winner",
+                    "value": {
+                        "status": "completed",
+                        "winner": "home_team",
+                    },
+                },
+                "reschedule_match": {
+                    "summary": "Reschedule match date",
+                    "description": "Change the date and venue for an upcoming match",
+                    "value": {
+                        "date": "2026-06-15",
+                        "venue": "Etihad Stadium",
+                    },
+                },
+                "add_lineup": {
+                    "summary": "Add team lineup",
+                    "description": "Add starting lineup before match",
+                    "value": {
+                        "home_lineup": [
+                            {
+                                "number": 1,
+                                "name": "Aaron Ramsdale",
+                                "position": "goalkeeper",
+                                "is_captain": False,
+                            },
+                            {
+                                "number": 10,
+                                "name": "Martin Odegaard",
+                                "position": "midfielder",
+                                "is_captain": True,
+                            },
+                        ]
+                    },
+                },
+            }
+        ),
+    ],
+):
+    i = INITIAL_DATA.index(match)
+    stored_match_data = match.model_dump()
+    update_data = update.model_dump(exclude_unset=True)
+    updated_match_dict = {**stored_match_data, **update_data}
+
+    try:
+        validated_match = Match.model_validate(updated_match_dict)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(e),
+        )
+
+    INITIAL_DATA[i] = validated_match
+    return validated_match
+
+
+@router.put("/{match_id}", response_model=MatchResponse, response_model_exclude_none=True)
+def replace_match(
+    match: Annotated[Match, Depends(get_match_or_404)],
+    new_match: Annotated[
+        Match,
+        Body(
+            openapi_examples={
+                "replace_upcoming": {
+                    "summary": "Replace with upcoming match",
+                    "description": "Completely replace match data with new upcoming match details",
+                    "value": {
+                        "home_team": "Manchester City",
+                        "away_team": "Tottenham",
+                        "sport": "football",
+                        "date": "2026-05-20",
+                        "status": "upcoming",
+                        "venue": "Etihad Stadium",
+                    },
+                },
+                "replace_completed": {
+                    "summary": "Replace with completed match",
+                    "description": "Replace entire match with completed match data including winner",
+                    "value": {
+                        "home_team": "Arsenal",
+                        "away_team": "Chelsea",
+                        "sport": "football",
+                        "date": "2026-05-15",
+                        "status": "completed",
+                        "venue": "Wembley Stadium",
+                        "winner": "home_team",
+                    },
+                },
+            }
+        ),
+    ],
+):
+    i = INITIAL_DATA.index(match)
+    new_match.id = match.id
+    INITIAL_DATA[i] = new_match
+    return new_match
+
+
+@router.delete("/{match_id}", response_model=MatchResponse, response_model_exclude_none=True)
+def delete_match(match: Annotated[Match, Depends(get_match_or_404)]):
+    INITIAL_DATA.remove(match)
+    return match
+`
+
+In the last chapter you learned that a dependency is a function FastAPI calls before your route. But if you look at the `list_matches` route, you've actually been using dependencies based on *classes* this whole time — and never knew it:
+
+```python
+@router.get("", ...)
+def list_matches(
+    filters: Annotated[MatchFilters, Depends()],        # ← class dependency
+    date_range: Annotated[DateRangeFilters, Depends()], # ← class dependency
+    pagination: Annotated[PaginationParams, Depends()], # ← class dependency
+    sort_params: Annotated[SortParams, Depends()],      # ← class dependency
+):
+```
+
+`MatchFilters`, `DateRangeFilters`, `PaginationParams`, and `SortParams` are all Pydantic classes used as dependencies. This chapter explains exactly how and why that works, then takes it a step further with sub-dependencies — dependencies that themselves depend on other dependencies.
+
+By the end of this chapter you'll have:
+- A solid understanding of how classes work as dependencies
+- A `get_query_bundle` function that wraps all four query-param dependencies into one
+- A `QueryBundle` model that groups all the query concerns, making `list_matches` cleaner
+
+---
+
+## How Classes Work as Dependencies
+
+When you write `Depends(some_function)`, FastAPI calls that function and injects the return value. When you write `Depends()` with no argument — or `Depends(SomeClass)` — FastAPI calls the class's `__init__` method instead.
+
+Calling `__init__` is just another way of saying "create a new instance." So `Depends(MatchFilters)` is FastAPI saying: "create a new `MatchFilters` instance, using the incoming request data to fill in the fields."
+
+Here's what happens step by step when FastAPI processes `filters: Annotated[MatchFilters, Depends()]`:
+
+```
+Request arrives: GET /matches?sport=football&status=upcoming
+                       │
+                       ▼
+  FastAPI sees: Annotated[MatchFilters, Depends()]
+  → reads MatchFilters.__init__ (its field definitions)
+  → sees: sport, status, winner, team, team_filter (all Optional with defaults)
+  → extracts values from the query string
+  → calls: MatchFilters(sport="football", status="upcoming")
+  → Pydantic validates and normalises the values
+  → model_validator runs
+                       │
+                       ▼
+  filters = MatchFilters(sport=Sport.football, status=Status.upcoming, ...)
+  injected into list_matches
+```
+
+The `Depends()` with no argument is shorthand for `Depends(MatchFilters)` — FastAPI infers the class from the type annotation. Both work identically:
+
+```python
+# These are equivalent:
+filters: Annotated[MatchFilters, Depends()]
+filters: Annotated[MatchFilters, Depends(MatchFilters)]
+```
+
+The first form is cleaner and more commonly used when the dependency type matches the annotation type exactly.
+
+<Callout type="info" title="Why Pydantic models work so well as dependencies">
+  A Pydantic model's `__init__` signature is auto-generated from its field definitions. FastAPI reads that signature the same way it reads any function — it sees the parameter names, types, and defaults, then extracts matching values from the query string.
+
+  This is exactly why we switched from `Query()` to `Depends()` in an earlier chapter. `Query()` is for individual query parameters. `Depends()` on a class groups many query parameters together into a structured, validated object. The class's validators and `model_validator` run as part of the injection — all the validation you wrote in `MatchFilters` runs automatically before your route function even starts.
+</Callout>
+
+---
+
+## Sub-dependencies — Dependencies That Depend on Other Dependencies
+
+A sub-dependency is simply a dependency function whose parameters are themselves dependencies. FastAPI builds a dependency graph and resolves everything in the right order.
+
+Look at the current `list_matches` signature:
+
+```python
+def list_matches(
+    filters: Annotated[MatchFilters, Depends()],
+    date_range: Annotated[DateRangeFilters, Depends()],
+    pagination: Annotated[PaginationParams, Depends()],
+    sort_params: Annotated[SortParams, Depends()],
+):
+```
+
+Four separate parameters, all query-related. The function signature is getting long before the actual logic even starts. You can bundle all four into a single dependency using a sub-dependency:
+
+```python title="app/routes/matches.py"
+def get_query_bundle(
+    filters: Annotated[MatchFilters, Depends()],          # !mark
+    date_range: Annotated[DateRangeFilters, Depends()],   # !mark
+    pagination: Annotated[PaginationParams, Depends()],   # !mark
+    sort_params: Annotated[SortParams, Depends()],        # !mark
+) -> QueryBundle:
+    return QueryBundle(
+        filters=filters,
+        date_range=date_range,
+        pagination=pagination,
+        sort_params=sort_params,
+    )
+```
+
+`get_query_bundle` is a function that takes four dependencies as parameters. FastAPI resolves each of those dependencies first (building `MatchFilters`, `DateRangeFilters`, etc. from the query string), then calls `get_query_bundle` with all four, then injects the returned `QueryBundle` into your route.
+
+The route signature becomes:
+
+```python title="app/routes/matches.py"
+@router.get("", response_model=MatchListResponse, response_model_exclude_none=True)
+def list_matches(q: Annotated[QueryBundle, Depends(get_query_bundle)]):  # !mark
+    ...
+```
+
+One parameter instead of four. The function body accesses everything through `q`:
+
+```python
+# Before:
+if filters.sport:
+if date_range.from_date:
+results[pagination.offset : pagination.offset + pagination.limit]
+
+# After:
+if q.filters.sport:
+if q.date_range.from_date:
+results[q.pagination.offset : q.pagination.offset + q.pagination.limit]
+```
+
+---
+
+## The `QueryBundle` Model
+
+`QueryBundle` is the container that `get_query_bundle` returns. Add it to `app/models.py`:
+
+```python title="app/models.py"
+class QueryBundle(BaseModel):
+    """Combines all query concerns into a single injectable dependency."""
+
+    model_config = {"arbitrary_types_allowed": True}  # !mark
+
+    filters: MatchFilters
+    date_range: DateRangeFilters
+    pagination: PaginationParams
+    sort_params: SortParams
+```
+
+The `model_config = {"arbitrary_types_allowed": True}` line deserves an explanation. By default Pydantic only allows "simple" types as field values — strings, ints, other Pydantic models it knows how to validate. When you nest one Pydantic model inside another as a field type, Pydantic needs to be told this is intentional. `arbitrary_types_allowed` tells Pydantic to trust that these nested models are already valid and not try to re-validate them from scratch.
+
+<Callout type="info" title="When do you need arbitrary_types_allowed?">
+  You need it when a Pydantic model contains fields typed as other Pydantic models that weren't created by parsing raw data. Here, `MatchFilters` etc. were already created and validated by FastAPI's dependency system — `QueryBundle` is just grouping pre-built objects together. Without this config, Pydantic would try to re-validate them as if they were raw dicts, which would fail.
+</Callout>
+
+---
+
+## FastAPI's Dependency Graph — Only Called Once
+
+Here's something important: if the same dependency appears multiple times in the resolution chain, FastAPI calls it only once per request and reuses the result.
+
+Imagine both `get_query_bundle` and some other function both depended on `PaginationParams`. FastAPI would call `PaginationParams(...)` once, cache the result for that request, and use that same instance everywhere it's needed. You never get inconsistent state from one dependency being called twice with different results.
+
+```
+Request arrives
+      │
+      ▼
+FastAPI builds the dependency graph:
+
+list_matches
+  └── get_query_bundle
+        ├── MatchFilters       ← called once, result cached
+        ├── DateRangeFilters   ← called once, result cached
+        ├── PaginationParams   ← called once, result cached
+        └── SortParams         ← called once, result cached
+
+FastAPI resolves leaves first (bottom up),
+then assembles the result upward.
+```
+
+This caching behaviour is per-request — the next request starts fresh.
+
+---
+
+## Step 1 — Add `QueryBundle` to `app/models.py`
+
+Open `app/models.py` and add `QueryBundle` at the bottom, after `SortParams`:
+
+```python title="app/models.py"
+class QueryBundle(BaseModel):
+    """Combines all query concerns into a single injectable dependency."""
+
+    model_config = {"arbitrary_types_allowed": True}
+
+    filters: MatchFilters
+    date_range: DateRangeFilters
+    pagination: PaginationParams
+    sort_params: SortParams
+```
+
+Also add `QueryBundle` to the imports in `app/routes/matches.py`:
+
+```python title="app/routes/matches.py"
+from app.models import (
+    DateRangeFilters,
+    Match,
+    MatchFilters,
+    MatchListResponse,
+    MatchResponse,
+    MatchUpdate,
+    PaginationParams,
+    QueryBundle,       # !mark
+    SortParams,
+    Status,
+    TeamFilter,
+    Winner,
+)
+```
+
+---
+
+## Step 2 — Write `get_query_bundle`
+
+Add this function to `app/routes/matches.py`, after `get_match_or_404`:
+
+```python title="app/routes/matches.py"
+def get_query_bundle(
+    filters: Annotated[MatchFilters, Depends()],
+    date_range: Annotated[DateRangeFilters, Depends()],
+    pagination: Annotated[PaginationParams, Depends()],
+    sort_params: Annotated[SortParams, Depends()],
+) -> QueryBundle:
+    return QueryBundle(
+        filters=filters,
+        date_range=date_range,
+        pagination=pagination,
+        sort_params=sort_params,
+    )
+```
+
+---
+
+## Step 3 — Update `list_matches`
+
+Replace the four-parameter signature with the single `QueryBundle` dependency and update all references inside the function body:
+
+```python title="app/routes/matches.py"
+@router.get("", response_model=MatchListResponse, response_model_exclude_none=True)
+def list_matches(q: Annotated[QueryBundle, Depends(get_query_bundle)]):  # !mark
+    results = INITIAL_DATA
+
+    if q.filters.sport:  # !mark
+        results = [m for m in results if m.sport == q.filters.sport]  # !mark
+
+    if q.filters.status:  # !mark
+        results = [m for m in results if m.status == q.filters.status]  # !mark
+
+    # ... all other filters use q.filters., q.date_range., etc.
+
+    total = len(results)
+    results = results[q.pagination.offset : q.pagination.offset + q.pagination.limit]  # !mark
+
+    return {
+        "total": total,
+        "page": q.pagination.page,  # !mark
+        "limit": q.pagination.limit,  # !mark
+        "matches": results,
+    }
+```
+
+The URL still works identically — `GET /matches?sport=football&page=2` — because FastAPI still reads the query string into `MatchFilters` and `PaginationParams` via their dependencies. The only change is how those values are delivered to your function.
+
+---
+
+## The Dependency Tree for `list_matches`
+
+Here's the complete resolution order for a request to `GET /matches?sport=football`:
+
+```
+list_matches(q)
+      │
+      └── get_query_bundle(filters, date_range, pagination, sort_params)
+                │               │               │               │
+                ▼               ▼               ▼               ▼
+          MatchFilters()  DateRangeFilters() PaginationParams() SortParams()
+          (from query str) (from query str)  (from query str) (from query str)
+```
+
+FastAPI resolves from the bottom up. It builds all four Pydantic models from the query string, passes them to `get_query_bundle`, which bundles them into a `QueryBundle`, which gets injected into `list_matches` as `q`.
+
+---
+
+## What You've Learned
+
+- **Classes as dependencies** — `Depends()` calls a class's `__init__`, creating an instance from request data; Pydantic models work perfectly for this
+- **`Depends()` vs `Depends(SomeClass)`** — they're equivalent when the annotation type matches; FastAPI infers the class from the type hint
+- **Sub-dependencies** — a dependency function whose parameters are themselves dependencies; FastAPI builds a graph and resolves everything in order
+- **`arbitrary_types_allowed`** — Pydantic config needed when a model contains fields that are already-validated Pydantic model instances
+- **Per-request caching** — FastAPI calls each dependency once per request, even if it's referenced multiple times in the graph
+- **`QueryBundle`** — a container model that groups all query-param dependencies, giving `list_matches` a single clean parameter instead of four
+
+---
+
+## What's Next
+
+You now understand how dependencies work and how they can depend on each other. The last piece is dependencies that run for their side effects — things you want to execute for every request without needing the return value in your route function. That's what decoractor-level and global dependencies are for.
+
+<Tabs items={['app/models.py', 'app/routes/matches.py']}>
+  <Tab value="app/models.py">
+    <CopyFinalCode code={_models} />
+  </Tab>
+  <Tab value="app/routes/matches.py">
+    <CopyFinalCode code={_routes} />
+  </Tab>
+</Tabs>

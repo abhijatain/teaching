@@ -1,0 +1,9 @@
+{
+  "title": "Prerequisites",
+  "description": "Learn FastAPI by building a sports matches API from scratch, starting with strings and progressively adding type safety, validation, and filters.",
+  "pages": [
+    "01-intro-depends",
+    "02-depends-inter",
+    "03-final-depends",
+  ]
+}

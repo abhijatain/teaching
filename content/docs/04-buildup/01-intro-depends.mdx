@@ -1,0 +1,630 @@
+---
+title: Dependencies — What is Depends() and Why It Exists
+description: Stop duplicating code across routes. Learn how FastAPI's dependency injection system works and use it to eliminate the repeated "find match or 404" logic scattered across your API.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Tab, Tabs } from 'fumadocs-ui/components/tabs';
+import { CopyFinalCode } from '@/components/copy-final-code';
+
+export const _routes = `from datetime import date as dt_date
+from typing import Annotated, List
+
+from fastapi import APIRouter, Body, Depends, HTTPException, Path, status
+
+from app.database import INITIAL_DATA
+from app.models import (
+    DateRangeFilters,
+    Match,
+    MatchFilters,
+    MatchListResponse,
+    MatchResponse,
+    MatchUpdate,
+    PaginationParams,
+    SortParams,
+    Status,
+    TeamFilter,
+    Winner,
+)
+
+router = APIRouter(prefix="/matches", tags=["Matches"])
+
+
+def get_match_or_404(match_id: Annotated[int, Path(ge=1, title="Match ID")]) -> Match:
+    for match in INITIAL_DATA:
+        if match.id == match_id:
+            return match
+    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Match not found")
+
+
+@router.get("", response_model=MatchListResponse, response_model_exclude_none=True)
+def list_matches(
+    filters: Annotated[MatchFilters, Depends()],
+    date_range: Annotated[DateRangeFilters, Depends()],
+    pagination: Annotated[PaginationParams, Depends()],
+    sort_params: Annotated[SortParams, Depends()],
+):
+    results = INITIAL_DATA
+
+    if filters.sport:
+        results = [m for m in results if m.sport == filters.sport]
+
+    if filters.status:
+        results = [m for m in results if m.status == filters.status]
+
+    if filters.winner:
+        results = [m for m in results if m.winner == filters.winner]
+
+    if filters.team:
+        normalized_team = filters.team.strip().lower()
+        results = [
+            m
+            for m in results
+            if normalized_team in m.home_team or normalized_team in m.away_team
+        ]
+
+    if filters.team_filter and filters.team:
+        normalized_team = filters.team.strip().lower()
+        if filters.team_filter == TeamFilter.won:
+            results = [
+                m
+                for m in results
+                if (m.winner == Winner.home_team and normalized_team in m.home_team)
+                or (m.winner == Winner.away_team and normalized_team in m.away_team)
+            ]
+        elif filters.team_filter == TeamFilter.lost:
+            results = [
+                m
+                for m in results
+                if (m.winner == Winner.away_team and normalized_team in m.home_team)
+                or (m.winner == Winner.home_team and normalized_team in m.away_team)
+            ]
+        elif filters.team_filter == TeamFilter.draw:
+            results = [
+                m
+                for m in results
+                if m.winner == Winner.draw
+                and (normalized_team in m.home_team or normalized_team in m.away_team)
+            ]
+
+    if date_range.from_date:
+        results = [m for m in results if m.date >= date_range.from_date]
+
+    if date_range.to_date:
+        results = [m for m in results if m.date <= date_range.to_date]
+
+    if sort_params.sort_by:
+        reverse = sort_params.sort_order == "desc"
+        results = sorted(
+            results, key=lambda m: getattr(m, sort_params.sort_by), reverse=reverse
+        )
+
+    total = len(results)
+    results = results[pagination.offset : pagination.offset + pagination.limit]
+
+    return {
+        "total": total,
+        "page": pagination.page,
+        "limit": pagination.limit,
+        "matches": results,
+    }
+
+
+@router.get("/{match_id}", response_model=MatchResponse, response_model_exclude_none=True)
+def get_match(match: Annotated[Match, Depends(get_match_or_404)]):
+    return match
+
+
+@router.post("", response_model=MatchResponse, response_model_exclude_none=True, status_code=status.HTTP_201_CREATED)
+def create_match(
+    match: Annotated[
+        Match,
+        Body(
+            openapi_examples={
+                "basic": {
+                    "summary": "Basic upcoming match",
+                    "description": "Minimal required fields for creating a new match",
+                    "value": {
+                        "home_team": "Arsenal",
+                        "away_team": "Chelsea",
+                        "sport": "football",
+                        "date": "2026-03-15",
+                        "status": "upcoming",
+                        "venue": "Emirates Stadium",
+                    },
+                },
+                "completed": {
+                    "summary": "Completed match",
+                    "description": "A finished match with a winner",
+                    "value": {
+                        "home_team": "Real Madrid",
+                        "away_team": "Barcelona",
+                        "sport": "football",
+                        "date": "2025-10-26",
+                        "status": "completed",
+                        "venue": "Santiago Bernabeu",
+                        "winner": "home_team",
+                    },
+                },
+                "with_lineup": {
+                    "summary": "Match with player lineup",
+                    "description": "Include starting lineups for both teams",
+                    "value": {
+                        "home_team": "Arsenal",
+                        "away_team": "Chelsea",
+                        "sport": "football",
+                        "date": "2026-03-15",
+                        "status": "upcoming",
+                        "venue": "Emirates Stadium",
+                        "home_lineup": [
+                            {
+                                "number": 1,
+                                "name": "Aaron Ramsdale",
+                                "position": "goalkeeper",
+                                "is_captain": False,
+                            },
+                            {
+                                "number": 10,
+                                "name": "Martin Odegaard",
+                                "position": "midfielder",
+                                "is_captain": True,
+                            },
+                        ],
+                        "away_lineup": [
+                            {
+                                "number": 1,
+                                "name": "Kepa Arrizabalaga",
+                                "position": "goalkeeper",
+                                "is_captain": False,
+                            }
+                        ],
+                    },
+                },
+            }
+        ),
+    ],
+):
+    if match.status is Status.upcoming and match.date < dt_date.today():
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Upcoming match date cannot be in the past",
+        )
+    match.id = INITIAL_DATA[-1].id + 1
+    INITIAL_DATA.append(match)
+    return match
+
+
+@router.patch("/{match_id}", response_model=MatchResponse, response_model_exclude_none=True)
+def update_match(
+    match: Annotated[Match, Depends(get_match_or_404)],
+    update: Annotated[
+        MatchUpdate,
+        Body(
+            openapi_examples={
+                "update_venue": {
+                    "summary": "Update venue only",
+                    "description": "Change the match venue without affecting other fields",
+                    "value": {"venue": "Wembley Stadium"},
+                },
+                "record_result": {
+                    "summary": "Record match result",
+                    "description": "Update a match with completion status and winner",
+                    "value": {
+                        "status": "completed",
+                        "winner": "home_team",
+                    },
+                },
+                "reschedule_match": {
+                    "summary": "Reschedule match date",
+                    "description": "Change the date and venue for an upcoming match",
+                    "value": {
+                        "date": "2026-06-15",
+                        "venue": "Etihad Stadium",
+                    },
+                },
+                "add_lineup": {
+                    "summary": "Add team lineup",
+                    "description": "Add starting lineup before match",
+                    "value": {
+                        "home_lineup": [
+                            {
+                                "number": 1,
+                                "name": "Aaron Ramsdale",
+                                "position": "goalkeeper",
+                                "is_captain": False,
+                            },
+                            {
+                                "number": 10,
+                                "name": "Martin Odegaard",
+                                "position": "midfielder",
+                                "is_captain": True,
+                            },
+                        ]
+                    },
+                },
+            }
+        ),
+    ],
+):
+    i = INITIAL_DATA.index(match)
+    stored_match_data = match.model_dump()
+    update_data = update.model_dump(exclude_unset=True)
+    updated_match_dict = {**stored_match_data, **update_data}
+
+    try:
+        validated_match = Match.model_validate(updated_match_dict)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(e),
+        )
+
+    INITIAL_DATA[i] = validated_match
+    return validated_match
+
+
+@router.put("/{match_id}", response_model=MatchResponse, response_model_exclude_none=True)
+def replace_match(
+    match: Annotated[Match, Depends(get_match_or_404)],
+    new_match: Annotated[
+        Match,
+        Body(
+            openapi_examples={
+                "replace_upcoming": {
+                    "summary": "Replace with upcoming match",
+                    "description": "Completely replace match data with new upcoming match details",
+                    "value": {
+                        "home_team": "Manchester City",
+                        "away_team": "Tottenham",
+                        "sport": "football",
+                        "date": "2026-05-20",
+                        "status": "upcoming",
+                        "venue": "Etihad Stadium",
+                    },
+                },
+                "replace_completed": {
+                    "summary": "Replace with completed match",
+                    "description": "Replace entire match with completed match data including winner",
+                    "value": {
+                        "home_team": "Arsenal",
+                        "away_team": "Chelsea",
+                        "sport": "football",
+                        "date": "2026-05-15",
+                        "status": "completed",
+                        "venue": "Wembley Stadium",
+                        "winner": "home_team",
+                    },
+                },
+            }
+        ),
+    ],
+):
+    i = INITIAL_DATA.index(match)
+    new_match.id = match.id
+    INITIAL_DATA[i] = new_match
+    return new_match
+
+
+@router.delete("/{match_id}", response_model=MatchResponse, response_model_exclude_none=True)
+def delete_match(match: Annotated[Match, Depends(get_match_or_404)]):
+    INITIAL_DATA.remove(match)
+    return match
+`
+
+Look at these four route handlers from your current `app/routes/matches.py`. Each one has to find a match by ID and raise a 404 if it doesn't exist:
+
+```python title="get_match"
+@router.get("/{match_id}", ...)
+def get_match(match_id: Annotated[int, Path(ge=1, title="Match ID")]):
+    for match in INITIAL_DATA:       # repeated
+        if match.id == match_id:     # repeated
+            return match             # repeated
+    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Match not found")  # repeated
+```
+
+```python title="update_match"
+@router.patch("/{match_id}", ...)
+def update_match(match_id: Annotated[int, Path(ge=1, title="Match ID")], update: ...):
+    for i, match in enumerate(INITIAL_DATA):  # repeated
+        if match.id == match_id:              # repeated
+            ...
+    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Match not found")  # repeated
+```
+
+```python title="replace_match"
+@router.put("/{match_id}", ...)
+def replace_match(match_id: Annotated[int, Path(ge=1, title="Match ID")], match: ...):
+    for i, existing_match in enumerate(INITIAL_DATA):  # repeated
+        if existing_match.id == match_id:              # repeated
+            ...
+    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Match not found")  # repeated
+```
+
+```python title="delete_match"
+@router.delete("/{match_id}", ...)
+def delete_match(match_id: Annotated[int, Path(ge=1, title="Match ID")]):
+    for i, match in enumerate(INITIAL_DATA):  # repeated
+        if match.id == match_id:              # repeated
+            ...
+    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Match not found")  # repeated
+```
+
+The same logic — loop through the data, find the match, raise 404 if missing — is copy-pasted four times. If you ever need to change how matches are looked up (and you will, when you replace `INITIAL_DATA` with a real database), you'll have to change it in four places. Miss one and you have a bug.
+
+This is exactly the problem `Depends()` was built to solve.
+
+By the end of this chapter you'll have:
+- A clear mental model of what a dependency is and how FastAPI calls it
+- A single `get_match_or_404` function that all four routes share
+- All four routes simplified down to one or two lines each
+
+---
+
+## What is a Dependency?
+
+A dependency is just a function. You write it like any other Python function. The special part is that you tell FastAPI "before you run my route function, run *this* function first, and give me whatever it returns."
+
+Here's the simplest possible example — not from the project, just to show the shape:
+
+```python
+def get_current_user():
+    return {"name": "Alice", "role": "admin"}
+
+@router.get("/dashboard")
+def dashboard(user: Annotated[dict, Depends(get_current_user)]):
+    return {"message": f"Welcome, {user['name']}"}
+```
+
+When a request hits `GET /dashboard`, FastAPI:
+1. Sees that `dashboard` needs `user`, which comes from `Depends(get_current_user)`
+2. Calls `get_current_user()` automatically
+3. Takes whatever it returned (`{"name": "Alice", "role": "admin"}`)
+4. Passes it into `dashboard` as the `user` argument
+5. Runs `dashboard` with that value in hand
+
+Your route function never calls `get_current_user()` directly. FastAPI does it for you. That's what "injection" means — the dependency's return value is *injected* into your function.
+
+<Callout type="info" title="Why 'dependency injection'?">
+  The term sounds complicated but the idea is simple. Normally your function is responsible for getting everything it needs — you'd call `get_current_user()` yourself inside the function body. With dependency injection, you *declare* what you need and something else (FastAPI) is responsible for providing it.
+
+  The benefit is that the thing providing the value can be swapped out — in tests, you can replace `get_current_user` with a mock that returns a fake user, without changing any route code. You'll see this payoff clearly when you write tests later.
+</Callout>
+
+---
+
+## Dependencies Can Use Path Parameters Too
+
+A dependency function can declare the same parameters as a route function — path parameters, query parameters, anything FastAPI knows how to extract from a request.
+
+This is the key insight for the `get_match_or_404` refactor. The dependency can declare `match_id: int` as a path parameter and FastAPI will extract it from the URL automatically, just like it would for a route function.
+
+```python
+def get_match_or_404(match_id: Annotated[int, Path(ge=1, title="Match ID")]) -> Match:
+    for match in INITIAL_DATA:
+        if match.id == match_id:
+            return match
+    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Match not found")
+```
+
+This is a normal Python function. It takes `match_id` from the URL path, loops through the data, returns the match if found, raises `HTTPException` if not. The `-> Match` return type annotation is just good practice — it tells Python (and you) what this function gives back.
+
+FastAPI will call this function before any route that depends on it, passing in the `match_id` from the URL automatically.
+
+---
+
+## Step 1 — Write `get_match_or_404`
+
+Add this function to `app/routes/matches.py`, right after the imports and router creation, before any route handlers:
+
+```python title="app/routes/matches.py"
+router = APIRouter(prefix="/matches", tags=["Matches"])
+
+
+def get_match_or_404(match_id: Annotated[int, Path(ge=1, title="Match ID")]) -> Match:  # !mark
+    for match in INITIAL_DATA:  # !mark
+        if match.id == match_id:  # !mark
+            return match  # !mark
+    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Match not found")  # !mark
+```
+
+That's the entire dependency. Now let's use it.
+
+---
+
+## Step 2 — Simplify `get_match`
+
+Before:
+
+```python title="Before"
+@router.get("/{match_id}", response_model=MatchResponse, response_model_exclude_none=True)
+def get_match(match_id: Annotated[int, Path(ge=1, title="Match ID")]):
+    for match in INITIAL_DATA:
+        if match.id == match_id:
+            return match
+    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Match not found")
+```
+
+After:
+
+```python title="After"
+@router.get("/{match_id}", response_model=MatchResponse, response_model_exclude_none=True)
+def get_match(match: Annotated[Match, Depends(get_match_or_404)]):  # !mark
+    return match  # !mark
+```
+
+The route function went from 5 lines of logic to 2. FastAPI calls `get_match_or_404`, which looks up the match (using the `{match_id}` from the URL), and hands the result to `get_match` as `match`. If the match doesn't exist, `get_match_or_404` raises the 404 before `get_match` even runs.
+
+Notice the parameter name changed from `match_id: int` to `match: Match`. The route no longer cares about the ID — it just wants the match object. The dependency handles the ID extraction.
+
+---
+
+## Step 3 — Simplify `update_match`
+
+Before, `update_match` had to find the match, get its index, and then do the update logic — all mixed together:
+
+```python title="Before"
+def update_match(
+    match_id: Annotated[int, Path(ge=1, title="Match ID")],
+    update: Annotated[MatchUpdate, Body(...)],
+):
+    for i, match in enumerate(INITIAL_DATA):  # find the match
+        if match.id == match_id:              # find the match
+            stored_match_data = match.model_dump()
+            update_data = update.model_dump(exclude_unset=True)
+            ...
+    raise HTTPException(...)  # 404
+```
+
+After, the route receives the already-found `match` from the dependency. To get its index for the in-place replacement, use `INITIAL_DATA.index(match)`:
+
+```python title="After"
+def update_match(
+    match: Annotated[Match, Depends(get_match_or_404)],  # !mark
+    update: Annotated[MatchUpdate, Body(...)],
+):
+    i = INITIAL_DATA.index(match)  # !mark
+    stored_match_data = match.model_dump()
+    update_data = update.model_dump(exclude_unset=True)
+    updated_match_dict = {**stored_match_data, **update_data}
+
+    try:
+        validated_match = Match.model_validate(updated_match_dict)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(e),
+        )
+
+    INITIAL_DATA[i] = validated_match
+    return validated_match
+```
+
+`INITIAL_DATA.index(match)` returns the position of the match object in the list. This works because the dependency returns the exact same object that lives in `INITIAL_DATA`, so Python's identity check finds it immediately.
+
+The 404 logic is completely gone from the function body. The update logic is now clearly the only thing this function does.
+
+---
+
+## Step 4 — Simplify `replace_match`
+
+Before, there was a naming conflict — the route had a `match` parameter for the *existing* match (found by ID) and another `match` parameter for the *new* match from the request body. Mixing those up was easy.
+
+After splitting them with the dependency:
+
+```python title="After"
+def replace_match(
+    match: Annotated[Match, Depends(get_match_or_404)],  # !mark — the existing match
+    new_match: Annotated[Match, Body(openapi_examples={...})],  # !mark — the replacement
+):
+    i = INITIAL_DATA.index(match)
+    new_match.id = match.id  # preserve the original ID
+    INITIAL_DATA[i] = new_match
+    return new_match
+```
+
+The names are now unambiguous: `match` is what's already stored, `new_match` is what the client sent. No more `existing_match` vs `match` confusion.
+
+---
+
+## Step 5 — Simplify `delete_match`
+
+Before:
+
+```python title="Before"
+def delete_match(match_id: Annotated[int, Path(ge=1, title="Match ID")]):
+    for i, match in enumerate(INITIAL_DATA):
+        if match.id == match_id:
+            deleted_match = INITIAL_DATA.pop(i)
+            return deleted_match
+    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Match not found")
+```
+
+After:
+
+```python title="After"
+def delete_match(match: Annotated[Match, Depends(get_match_or_404)]):  # !mark
+    INITIAL_DATA.remove(match)  # !mark
+    return match  # !mark
+```
+
+`INITIAL_DATA.remove(match)` removes the first item in the list that equals `match`. Since every match has a unique ID and `match` is the exact object from the list, this works cleanly. The function went from 6 lines to 3.
+
+---
+
+## How FastAPI Resolves Dependencies
+
+It's worth understanding what FastAPI actually does when it sees `Depends(get_match_or_404)`:
+
+```
+Request arrives: GET /matches/3
+                       │
+                       ▼
+        FastAPI reads the route signature:
+        def get_match(match: Annotated[Match, Depends(get_match_or_404)])
+                       │
+                       ▼
+        FastAPI sees Depends(get_match_or_404)
+        → reads get_match_or_404's signature
+        → sees match_id: Annotated[int, Path(ge=1)]
+        → extracts "3" from the URL path
+        → calls get_match_or_404(match_id=3)
+                       │
+                  ┌────┴────┐
+                  │         │
+              found       not found
+                  │         │
+          returns Match   raises HTTPException (404)
+                  │
+                  ▼
+        FastAPI injects result into get_match as "match"
+                  │
+                  ▼
+        get_match runs: return match
+```
+
+The route function itself never touches the URL. It just receives the already-validated, already-looked-up `Match` object. If anything in the dependency fails — 404, validation error, anything — the route function never runs at all.
+
+<Callout type="info" title="The return type annotation matters">
+  Notice `-> Match` on `get_match_or_404`. FastAPI uses this to understand what type the dependency returns, which helps with type checking and IDE autocompletion. When you write `match: Annotated[Match, Depends(get_match_or_404)]`, your IDE knows `match` is a `Match` object and gives you proper autocomplete on `match.id`, `match.sport`, etc.
+
+  You can omit it and things still work, but annotating return types is good practice and makes the code easier to read.
+</Callout>
+
+---
+
+## The Result — Before and After
+
+Here's what each route looked like before and after:
+
+| Route | Before (lines of logic) | After (lines of logic) |
+|-------|------------------------|----------------------|
+| `GET /{match_id}` | 5 — loop + return + 404 | 2 — just `return match` |
+| `PATCH /{match_id}` | 8 — loop + enumerate + update + 404 | 5 — just update logic |
+| `PUT /{match_id}` | 5 — loop + replace + 404 | 3 — just replace logic |
+| `DELETE /{match_id}` | 6 — loop + pop + return + 404 | 3 — just remove + return |
+
+The 404 logic exists in exactly one place: `get_match_or_404`. When you replace `INITIAL_DATA` with a real database in the SQLAlchemy chapters, you'll update that one function and every route gets the new behaviour automatically.
+
+---
+
+## What You've Learned
+
+- **What a dependency is** — a function FastAPI calls before your route, injecting its return value as a parameter
+- **`Depends(fn)`** — tells FastAPI to call `fn` and inject the result; used inside `Annotated`
+- **Dependencies can declare path/query params** — FastAPI extracts them from the request just like it would for a route function
+- **`-> ReturnType` annotation** — tells FastAPI and your IDE what type the dependency returns
+- **`list.index(item)`** — finds the position of an object in a list; works because the dependency returns the same object instance that lives in the list
+- **`list.remove(item)`** — removes an item by value rather than by index; clean for delete after the dependency already found the object
+- **Single responsibility** — each route function now does exactly one thing; the lookup concern lives in the dependency
+
+---
+
+## What's Next
+
+You've used `Depends()` with a plain function. In the next chapter you'll learn about classes as dependencies — which is actually what's already happening with `MatchFilters`, `PaginationParams`, `DateRangeFilters`, and `SortParams`. You've been using class-based dependencies this whole time without knowing it.
+
+<Tabs items={['app/routes/matches.py']}>
+  <Tab value="app/routes/matches.py">
+    <CopyFinalCode code={_routes} />
+  </Tab>
+</Tabs>
