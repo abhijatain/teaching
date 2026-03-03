@@ -1,0 +1,106 @@
+---
+title: Why We Need a Database
+description: Your API loses every match the moment it restarts. Here's why that happens, what a database actually is, and what changes in this module.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+# Why We Need a Database
+
+Your API works. You can create matches, update them, filter them. But try this:
+
+1. `POST /matches` — create a new match
+2. Stop the server with `Ctrl+C`
+3. Start it again with `uvicorn main:app --reload`
+4. `GET /matches` — your match is gone
+
+Every match you created is gone. You're back to the 7 hardcoded matches every single time.
+
+---
+
+## Why This Happens
+
+All your matches live in `INITIAL_DATA` inside `app/database.py`:
+
+```python title="app/database.py (current)"
+INITIAL_DATA: List[Match] = [
+    Match(id=1, home_team="arsenal", ...),
+    Match(id=2, home_team="lakers", ...),
+    ...
+]
+```
+
+This is a Python list — it lives in **RAM** (your computer's memory). RAM only exists while the program is running. The moment the process stops, everything in RAM is wiped. Next restart, Python re-runs the file and creates a fresh list from the hardcoded values.
+
+This is fine for learning. It's completely unusable in production.
+
+---
+
+## What a Database Gives You
+
+A database stores data on **disk** — the hard drive — not in RAM. Disk survives restarts, crashes, and deployments.
+
+Beyond persistence, databases also give you:
+
+- **Querying** — ask the database to find exactly what you need. No loading all 10 million rows into Python first.
+- **Filtering and sorting** — done inside the database, faster than Python list comprehensions.
+- **Concurrent access** — multiple users reading and writing at the same time, safely.
+- **Transactions** — either all your changes happen, or none of them do. No half-saved data.
+
+---
+
+## Why SQLite First
+
+There are many databases: PostgreSQL, MySQL, SQL Server. For production you'll use PostgreSQL. But for learning, **SQLite** is the right place to start.
+
+SQLite stores your entire database in a single `.db` file on disk. No server to install. No separate process to run. No configuration. It's built into Python's standard library.
+
+```
+sports_api/
+├── main.py
+├── matches.db      ← your entire database, one file
+└── app/
+    └── ...
+```
+
+| | SQLite | PostgreSQL |
+|-|--------|-----------|
+| Setup | Nothing — built into Python | Install + run a server |
+| Storage | One `.db` file | Database server manages storage |
+| Good for | Learning, local dev, small apps | Production, high traffic |
+| Switching cost | One line — the connection URL |
+
+The last row is the key point. With the ORM we're using (SQLAlchemy), switching from SQLite to PostgreSQL is literally changing one string. Your routes, models, and logic don't change at all.
+
+---
+
+## What Changes in This Module
+
+By the end, your API will:
+
+- Store every match in a real `matches.db` file
+- Persist data across restarts — `Ctrl+C` and restart, matches are still there
+- Use SQLAlchemy to talk to the database (no raw SQL in your routes)
+- Work identically from the outside — same endpoints, same URLs, same request/response shapes
+
+The files that change:
+
+```
+app/database.py    ← replace INITIAL_DATA with engine + session
+app/routes/matches.py  ← replace list operations with DB queries
+```
+
+Two new files:
+
+```
+app/db_models.py   ← SQLAlchemy table definitions (new)
+seed.py            ← script to insert starting data (new)
+```
+
+`app/models.py` doesn't change at all. Your Pydantic models stay exactly as they are.
+
+---
+
+## What's Next
+
+Before writing code, let's understand the tool doing the work: SQLAlchemy, and what an ORM actually does.

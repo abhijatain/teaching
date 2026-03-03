@@ -1,0 +1,237 @@
+---
+title: Setup — Install, Table Definition & Connection
+description: Install SQLAlchemy, create app/db_models.py with the MatchModel table, replace app/database.py with a real engine and session, and create the database on startup.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+# Setup — Install, Table Definition & Connection
+
+Three files to create or update. By the end of this lesson the database file will exist and the `matches` table will be ready.
+
+---
+
+## Step 1 — Install SQLAlchemy
+
+```bash
+pip install sqlalchemy
+```
+
+Verify:
+
+```bash
+python -c "import sqlalchemy; print(sqlalchemy.__version__)"
+# 2.0.x
+```
+
+<Callout type="warn" title="Needs SQLAlchemy 2.x">
+  This module uses the modern SQLAlchemy 2 API — `Mapped`, `mapped_column`, `select()`. If you have 1.x installed, run `pip install --upgrade sqlalchemy`.
+</Callout>
+
+No extra database driver needed — SQLite is part of Python's standard library.
+
+---
+
+## Step 2 — Create `app/db_models.py`
+
+This is a new file. It defines the `MatchModel` class — SQLAlchemy's representation of the `matches` table.
+
+```python title="app/db_models.py"
+from sqlalchemy import Date, String
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+class MatchModel(Base):
+    __tablename__ = "matches"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    home_team: Mapped[str] = mapped_column(String(50))
+    away_team: Mapped[str] = mapped_column(String(50))
+    venue: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    date: Mapped[Date] = mapped_column(Date)
+    sport: Mapped[str] = mapped_column(String(20))
+    status: Mapped[str] = mapped_column(String(20))
+    winner: Mapped[str | None] = mapped_column(String(20), nullable=True)
+```
+
+### What each part does
+
+**`Base`** is the foundation all SQLAlchemy table classes inherit from. You define it once, then every table class (`MatchModel`, and any future ones) inherits from it. SQLAlchemy uses `Base` to track all your table definitions.
+
+**`__tablename__ = "matches"`** is the actual name of the table in the database file. SQLAlchemy creates a table with this exact name.
+
+**`Mapped[type]`** declares the Python type for each column. SQLAlchemy uses this when reading rows back from the database — it knows to return a Python `str`, not raw bytes.
+
+**`mapped_column(...)`** configures the database column itself:
+
+| Option | What it does |
+|--------|-------------|
+| `primary_key=True` | Unique row identifier — no two rows can share an `id` |
+| `autoincrement=True` | Database assigns the next integer automatically |
+| `String(50)` | Text column, max 50 characters |
+| `Date` | Date column (stores `YYYY-MM-DD`) |
+| `nullable=True` | Column can be `NULL` — required for optional fields |
+
+**`Mapped[str | None]`** on `venue` and `winner` means the Python value is either a `str` or `None`, matching `nullable=True` on the column.
+
+<Callout type="info" title="No home_lineup or away_lineup yet">
+  The original `Match` model had `home_lineup` and `away_lineup` — lists of `Player` objects. Storing a list of related objects requires a separate `players` table linked by a foreign key. We're keeping this focused on the core match data for now.
+</Callout>
+
+---
+
+## Step 3 — Replace `app/database.py`
+
+The current `app/database.py` holds `INITIAL_DATA`. We're replacing it entirely with the database engine and session setup.
+
+```python title="app/database.py"
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session
+
+from app.db_models import Base
+
+DATABASE_URL = "sqlite:///./matches.db"
+
+engine = create_engine(
+    DATABASE_URL,
+    connect_args={"check_same_thread": False},
+)
+
+
+def create_tables():
+    Base.metadata.create_all(engine)
+
+
+def get_db():
+    with Session(engine) as session:
+        yield session
+```
+
+### What each part does
+
+**`DATABASE_URL = "sqlite:///./matches.db"`**
+
+The connection string tells SQLAlchemy which database to use and how to reach it.
+
+```
+sqlite:///./matches.db
+  ↑       ↑
+dialect   path to file (relative to where you run uvicorn)
+```
+
+The three slashes after `sqlite:` are part of the format. `./matches.db` means a file called `matches.db` in your project root.
+
+When you switch to PostgreSQL later, this becomes one line:
+```python
+DATABASE_URL = "postgresql://user:password@localhost/matches_db"
+```
+
+Everything else stays the same.
+
+**`create_engine(...)`**
+
+The engine manages the pool of database connections. It doesn't open a connection immediately — it opens and reuses connections as needed. You create one engine for the entire app and reuse it.
+
+`connect_args={"check_same_thread": False}` is SQLite-specific. SQLite blocks one thread from using a connection opened in another thread. FastAPI uses multiple threads, so we disable this check. PostgreSQL doesn't need it.
+
+**`create_tables()`**
+
+`Base.metadata.create_all(engine)` looks at every class that inherits from `Base` — currently just `MatchModel` — and creates the corresponding tables if they don't already exist. If the `matches` table is already there, it does nothing.
+
+**`get_db()`**
+
+This is a **FastAPI dependency** — a function FastAPI will call automatically to give each route function a fresh database session.
+
+```python
+def get_db():
+    with Session(engine) as session:
+        yield session
+```
+
+The `yield` makes it a generator with two phases:
+- **Before yield**: opens a session
+- **After yield**: closes the session (runs after the route function returns, even if it raised an exception)
+
+Your route functions will declare `db: Annotated[Session, Depends(get_db)]` and FastAPI handles the rest. You never open or close sessions manually.
+
+---
+
+## Step 4 — Call `create_tables()` on Startup
+
+Tell FastAPI to create the tables before accepting any requests. In `main.py`:
+
+```diff title="main.py"
+  from fastapi import FastAPI
+
++ from app.database import create_tables
+  from app.routes.matches import router as matches_router
+
+  app = FastAPI(title="Sports Matches API")
+  app.include_router(matches_router)
+
+
++ @app.on_event("startup")
++ def on_startup():
++     create_tables()
+
+
+  @app.get("/health", tags=["System"])
+  def health_check():
+      return {"status": "ok"}
+```
+
+`@app.on_event("startup")` runs `on_startup()` once when the server starts, before it accepts any requests. This guarantees the `matches` table exists before any route tries to use it.
+
+---
+
+## Test: Does the Database File Appear?
+
+Start the server:
+
+```bash
+uvicorn main:app --reload
+```
+
+Check your project folder. A new file should be there:
+
+```
+sports_api/
+├── main.py
+├── matches.db    ← appeared automatically
+└── app/
+    ├── db_models.py
+    ├── database.py
+    └── ...
+```
+
+Open `matches.db` in a SQLite viewer (the **SQLite Viewer** VS Code extension works well, or drag it to [sqliteviewer.app](https://sqliteviewer.app)). You'll see an empty `matches` table with 8 columns — `id`, `home_team`, `away_team`, `venue`, `date`, `sport`, `status`, `winner`.
+
+The database exists. The table is ready. The routes still don't use it yet — that's next.
+
+---
+
+## Your Project Structure Now
+
+```
+sports_api/
+├── main.py             ← added on_startup
+├── matches.db          ← created on first run
+└── app/
+    ├── __init__.py
+    ├── models.py       ← unchanged
+    ├── db_models.py    ← new: MatchModel table definition
+    ├── database.py     ← replaced: engine + get_db
+    └── routes/
+        ├── __init__.py
+        └── matches.py  ← unchanged so far
+```
+
+---
+
+## What's Next
+
+The database is set up and the table exists. Now update the routes — starting with the two GET endpoints.

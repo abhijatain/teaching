@@ -1,0 +1,205 @@
+---
+title: Seeding the Database
+description: Add the original 7 matches as starting data — and make sure the script only inserts them once, not every time the server starts.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+# Seeding the Database
+
+The old `INITIAL_DATA` list gave you 7 pre-loaded matches every restart. Now the database starts empty. That's correct behaviour for a real app — but during development you want sample data to work with.
+
+**Seeding** is the process of populating a database with initial data.
+
+---
+
+## What We'll Build
+
+A `seed.py` file in the project root that:
+1. Checks if any matches already exist
+2. If the table is empty — inserts the original 7 matches
+3. If data is already there — does nothing
+
+This check means you can call `seed()` safely on every startup without duplicating data.
+
+---
+
+## Create `seed.py`
+
+```python title="seed.py"
+from datetime import date as dt_date
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from app.database import engine, create_tables
+from app.db_models import MatchModel
+
+
+SEED_MATCHES = [
+    MatchModel(
+        home_team="arsenal", away_team="chelsea",
+        sport="football", date=dt_date(2025, 10, 21),
+        status="completed", winner="draw",
+        venue="emirates stadium",
+    ),
+    MatchModel(
+        home_team="lakers", away_team="warriors",
+        sport="basketball", date=dt_date(2025, 11, 15),
+        status="completed", winner="home_team",
+        venue="crypto.com arena",
+    ),
+    MatchModel(
+        home_team="real madrid", away_team="barcelona",
+        sport="football", date=dt_date(2026, 4, 10),
+        status="completed", winner="draw",
+        venue="santiago bernabeu",
+    ),
+    MatchModel(
+        home_team="knicks", away_team="celtics",
+        sport="basketball", date=dt_date(2026, 3, 5),
+        status="upcoming", venue="madison square garden",
+    ),
+    MatchModel(
+        home_team="yankees", away_team="red sox",
+        sport="baseball", date=dt_date(2025, 8, 10),
+        status="abandoned", venue="yankee stadium",
+    ),
+    MatchModel(
+        home_team="india", away_team="pakistan",
+        sport="cricket", date=dt_date(2026, 3, 24),
+        status="completed", winner="home_team",
+        venue="narendra modi stadium",
+    ),
+    MatchModel(
+        home_team="lakers", away_team="warriors",
+        sport="basketball", date=dt_date(2025, 1, 15),
+        status="completed", winner="away_team",
+        venue="crypto.com arena",
+    ),
+]
+
+
+def seed():
+    create_tables()
+
+    with Session(engine) as db:
+        existing = db.execute(select(MatchModel)).scalars().first()  # !mark
+        if existing:                                                   # !mark
+            print("Database already seeded — skipping.")              # !mark
+            return                                                     # !mark
+
+        db.add_all(SEED_MATCHES)  # !mark
+        db.commit()
+        print(f"Seeded {len(SEED_MATCHES)} matches.")
+
+
+if __name__ == "__main__":
+    seed()
+```
+
+### Breaking it down
+
+**`db.execute(select(MatchModel)).scalars().first()`**
+
+Fetches the first row from `matches`. If the table is empty, returns `None`. This is the "already seeded?" check — if any row exists, skip the whole seed.
+
+**`if existing: return`**
+
+Bail out early if data is already there. Safe to call on every startup.
+
+**`db.add_all(SEED_MATCHES)`**
+
+Like `db.add()` but for a list — stages all 7 inserts at once. More efficient than calling `db.add()` seven times.
+
+---
+
+## Run It Manually
+
+```bash
+python seed.py
+```
+
+Output:
+```
+Seeded 7 matches.
+```
+
+Run it again:
+```bash
+python seed.py
+```
+
+Output:
+```
+Database already seeded — skipping.
+```
+
+Now start the server and check `GET /matches` — all 7 original matches are there.
+
+---
+
+## Call Seed on Startup
+
+Add `seed()` to the startup event in `main.py` so it runs automatically on first deploy:
+
+```diff title="main.py"
+  from fastapi import FastAPI
+
+  from app.database import create_tables
+  from app.routes.matches import router as matches_router
++ from seed import seed
+
+  app = FastAPI(title="Sports Matches API")
+  app.include_router(matches_router)
+
+
+  @app.on_event("startup")
+  def on_startup():
+      create_tables()
++     seed()
+
+
+  @app.get("/health", tags=["System"])
+  def health_check():
+      return {"status": "ok"}
+```
+
+Because `seed()` checks for existing data first, calling it on every startup is safe — it only inserts once.
+
+Start the server now:
+
+```
+Seeded 7 matches.
+INFO:     Application startup complete.
+```
+
+Restart:
+
+```
+Database already seeded — skipping.
+INFO:     Application startup complete.
+```
+
+---
+
+## Resetting During Development
+
+When you want to wipe the database and start fresh — common while building:
+
+```bash
+rm matches.db
+uvicorn main:app --reload
+```
+
+Deleting the file removes all tables and data. The next startup recreates the table and re-seeds it.
+
+<Callout type="warn" title="Only delete the file in development">
+  Deleting `matches.db` destroys all data permanently. In production you'd never do this — you'd use migrations to change the schema and keep existing data. We'll cover migrations in the next lesson.
+</Callout>
+
+---
+
+## What's Next
+
+Your API is fully database-backed with sample data. The final lesson shows the complete code for every file — ready to copy.

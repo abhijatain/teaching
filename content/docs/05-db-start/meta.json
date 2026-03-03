@@ -1,12 +1,14 @@
 {
-  "title": "Prerequisites",
+  "title": "Database Intro",
   "description": "Learn FastAPI by building a sports matches API from scratch, starting with strings and progressively adding type safety, validation, and filters.",
   "pages": [
-    "01-decorators",
-    "02-exceptions",
-    "03-http",
-    "04-rest",
-    "05-classes",
-    "06-json"
+    "01-why",
+    "02-orm",
+    "03-setup",
+    "04-get",
+    "05-post",
+    "06-patch-delete",
+    "07-seeding",
+    "08-final-code"
   ]
 }

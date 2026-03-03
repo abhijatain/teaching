@@ -1,0 +1,546 @@
+---
+title: Decorators in Python
+description: You've been writing @app.get and @field_validator since lesson one. Here's what those @ symbols actually mean, how decorators work from the ground up, and how to write your own.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+## You've Been Using Decorators This Whole Time
+
+Look at any route function you've written:
+
+```python
+@app.get("/matches/{match_id}", tags=["Matches"])
+def get_match(match_id: Annotated[int, Path(ge=1)]):
+    for match in INITIAL_DATA:
+        if match.id == match_id:
+            return match
+    raise HTTPException(status_code=404, detail="Match not found")
+```
+
+And in your Pydantic models:
+
+```python
+@field_validator("home_team", "away_team")
+@classmethod
+def normalize_team_name(cls, value):
+    return value.strip().lower()
+
+@model_validator(mode="after")
+def validate_match_logic(self):
+    if self.home_team == self.away_team:
+        raise ValueError("home_team and away_team must be different")
+    return self
+```
+
+Those `@` lines are decorators. You've been using them confidently, but maybe they've felt a bit like magic — you write `@app.get("/matches")` and somehow FastAPI registers your route, builds your docs, validates your inputs, and handles errors. How?
+
+This lesson demystifies decorators completely. By the end, you'll understand not just how to use them, but how they work — and you'll be able to write your own.
+
+---
+
+## The Prerequisite: Functions Are Objects
+
+Before we can talk about decorators, there's one Python concept you need to fully absorb: **functions are objects, just like strings, numbers, or lists**.
+
+In Python, everything is an object. When you write a function, Python creates a function object and binds it to a name. You can:
+
+- Assign a function to a variable
+- Pass a function as an argument to another function
+- Return a function from a function
+- Store a function in a list or dictionary
+
+Let's see each of these:
+
+### Assigning a function to a variable
+
+```python
+def greet(name):
+    return f"Hello, {name}!"
+
+# greet is just a variable that points to the function object.
+# We can create another variable pointing to the same object.
+say_hello = greet
+
+print(say_hello("Alice"))   # Hello, Alice!
+print(greet("Alice"))       # Hello, Alice! — still works too
+
+# They are the same object:
+print(greet is say_hello)   # True
+```
+
+Notice we wrote `say_hello = greet` without parentheses. `greet` refers to the function object itself. `greet("Alice")` — *with* parentheses — calls it.
+
+### Passing a function as an argument
+
+```python
+def shout(text):
+    return text.upper()
+
+def whisper(text):
+    return text.lower()
+
+def say_something(message, style_function):
+    result = style_function(message)
+    print(result)
+
+say_something("Hello World", shout)    # HELLO WORLD
+say_something("Hello World", whisper)  # hello world
+```
+
+We're passing `shout` and `whisper` as arguments — no parentheses, just the function object. The `say_something` function receives them and calls them internally.
+
+This is a pattern you've already seen: `sorted(matches, key=lambda m: m.date)` — the `key=` argument is a function that `sorted` calls on each item.
+
+### Returning a function from a function
+
+```python
+def make_multiplier(n):
+    def multiply(x):
+        return x * n
+    return multiply          # ← returning the function object, not calling it
+
+double = make_multiplier(2)
+triple = make_multiplier(3)
+
+print(double(5))    # 10
+print(triple(5))    # 15
+print(double(10))   # 20
+```
+
+`make_multiplier` creates a new function (`multiply`) every time it's called and returns it. `double` and `triple` are now each their own independent function objects.
+
+Notice that `multiply` uses `n` from the outer function, even though `make_multiplier` has already finished running. This is called a **closure** — the inner function "closes over" variables from its enclosing scope and keeps them alive. `double` permanently remembers `n=2`; `triple` permanently remembers `n=3`.
+
+<Callout type="info" title="Why this matters for decorators">
+  Decorators are built entirely from these three ideas: functions passed as arguments, functions returned from functions, and closures. Once you're comfortable with them, decorators are just a natural consequence.
+</Callout>
+
+---
+
+## Building a Decorator From Scratch
+
+Now let's build a decorator. The goal is to add behaviour to an existing function without modifying its source code.
+
+Say we have a simple function:
+
+```python
+def add(a, b):
+    return a + b
+```
+
+We want to print a log line every time it's called, showing what arguments it received and what it returned — without touching the `add` function itself.
+
+Here's a logging decorator:
+
+```python
+def log_calls(func):
+    # func is the function being decorated — in this case, add
+    
+    def wrapper(*args, **kwargs):
+        print(f"Calling {func.__name__} with args={args}, kwargs={kwargs}")
+        result = func(*args, **kwargs)   # call the original function
+        print(f"{func.__name__} returned {result}")
+        return result
+    
+    return wrapper  # return the wrapper function, not wrapper()
+```
+
+Now we can apply it manually:
+
+```python
+def add(a, b):
+    return a + b
+
+add = log_calls(add)   # replace add with the wrapped version
+```
+
+Let's trace exactly what happened:
+1. `log_calls(add)` is called. `func` inside `log_calls` is now our original `add` function.
+2. `log_calls` defines `wrapper` — a new function that logs and then calls `func`.
+3. `log_calls` returns `wrapper`.
+4. `add = log_calls(add)` replaces the `add` variable with `wrapper`.
+
+Now when we call `add(3, 4)`:
+
+```python
+result = add(3, 4)
+# Calling add with args=(3, 4), kwargs={}
+# add returned 7
+
+print(result)   # 7
+```
+
+The original `add` logic still runs (it's called inside `wrapper`), but it's now wrapped with logging behaviour. The caller doesn't need to know or care — `add(3, 4)` looks and works exactly the same from the outside.
+
+---
+
+## The `@` Syntax Is Just Shorthand
+
+The manual `add = log_calls(add)` pattern is exactly what `@` does. These two are identical:
+
+```python
+# Without @ syntax (manual):
+def add(a, b):
+    return a + b
+
+add = log_calls(add)
+
+
+# With @ syntax (the decorator shorthand):
+@log_calls
+def add(a, b):
+    return a + b
+```
+
+When Python sees `@log_calls` above a function definition, it automatically does `add = log_calls(add)` after the function is defined. The `@` is nothing more than syntactic sugar — a more readable way of writing the same thing.
+
+The decorator runs **at the time the function is defined**, not when the function is called. In a FastAPI app, this means all `@app.get(...)` decorators run when your module is imported — before any HTTP request arrives.
+
+---
+
+## `*args` and `**kwargs` — Accepting Any Arguments
+
+You've seen `wrapper(*args, **kwargs)` in the decorator above. This is how you write a wrapper that works for any function regardless of its signature.
+
+`*args` collects all positional arguments into a tuple:
+
+```python
+def show_args(*args):
+    print(args)
+
+show_args(1, 2, 3)          # (1, 2, 3)
+show_args("a", "b")         # ('a', 'b')
+show_args()                 # ()
+```
+
+`**kwargs` collects all keyword arguments into a dictionary:
+
+```python
+def show_kwargs(**kwargs):
+    print(kwargs)
+
+show_kwargs(name="Alice", age=30)   # {'name': 'Alice', 'age': 30}
+show_kwargs(sport="football")       # {'sport': 'football'}
+```
+
+Together, `*args, **kwargs` captures everything:
+
+```python
+def show_everything(*args, **kwargs):
+    print(f"Positional: {args}")
+    print(f"Keyword: {kwargs}")
+
+show_everything(1, 2, name="Alice", sport="football")
+# Positional: (1, 2)
+# Keyword: {'name': 'Alice', 'sport': 'football'}
+```
+
+The `*` and `**` also work in reverse — to **unpack** when calling a function:
+
+```python
+def add(a, b, c):
+    return a + b + c
+
+numbers = [1, 2, 3]
+print(add(*numbers))    # same as add(1, 2, 3) → 6
+
+data = {"a": 1, "b": 2, "c": 3}
+print(add(**data))      # same as add(a=1, b=2, c=3) → 6
+```
+
+In the decorator's `wrapper`, we use `*args, **kwargs` so the wrapper accepts whatever arguments the original function expects, and passes them through unchanged:
+
+```python
+def wrapper(*args, **kwargs):
+    # ... do stuff before ...
+    result = func(*args, **kwargs)   # pass all args through to original
+    # ... do stuff after ...
+    return result
+```
+
+This makes the decorator universal — it wraps any function regardless of how many or what kind of arguments it takes.
+
+---
+
+## A Real Example: Timing Your Functions
+
+Here's a decorator you might genuinely use in your project — measuring how long a function takes to run:
+
+```python
+import time
+
+def timer(func):
+    def wrapper(*args, **kwargs):
+        start = time.perf_counter()       # record start time
+        result = func(*args, **kwargs)    # run the original function
+        end = time.perf_counter()         # record end time
+        duration = end - start
+        print(f"⏱  {func.__name__} took {duration:.4f} seconds")
+        return result
+    return wrapper
+
+
+@timer
+def search_matches(matches, team_name):
+    """Search for all matches involving a given team."""
+    return [
+        m for m in matches
+        if team_name in m.home_team or team_name in m.away_team
+    ]
+
+
+results = search_matches(INITIAL_DATA, "arsenal")
+# ⏱  search_matches took 0.0001 seconds
+```
+
+The `search_matches` function has no idea it's being timed. The timing logic lives entirely in the decorator. This separation is the whole point — you can add cross-cutting behaviours (logging, timing, authentication checks, caching) without tangling them into your core logic.
+
+---
+
+## Decorators With Arguments
+
+Look at your route decorators more carefully:
+
+```python
+@app.get("/matches/{match_id}", tags=["Matches"])
+```
+
+This decorator takes arguments: a path string and a `tags` list. How does that work? A plain decorator like `log_calls` takes only a function. So what's happening here?
+
+The answer is a **decorator factory** — a function that takes configuration arguments and *returns* a decorator.
+
+Let's build one. Say we want a decorator that retries a function a configurable number of times if it raises an exception:
+
+```python
+def retry(times):
+    # This outer function is the "factory" — it takes config (times)
+    
+    def decorator(func):
+        # This is the actual decorator — it takes the function
+        
+        def wrapper(*args, **kwargs):
+            last_error = None
+            for attempt in range(1, times + 1):
+                try:
+                    return func(*args, **kwargs)
+                except Exception as e:
+                    last_error = e
+                    print(f"Attempt {attempt}/{times} failed: {e}")
+            raise last_error  # all attempts failed, re-raise the last error
+        
+        return wrapper
+    
+    return decorator  # factory returns the decorator
+```
+
+Using it:
+
+```python
+@retry(times=3)
+def fetch_score(match_id):
+    # Simulate a flaky network call
+    import random
+    if random.random() < 0.7:
+        raise ConnectionError("Network timeout")
+    return f"Score for match {match_id}: 2-1"
+
+
+result = fetch_score(42)
+# Attempt 1/3 failed: Network timeout
+# Attempt 2/3 failed: Network timeout
+# (succeeds on attempt 3)
+```
+
+When Python sees `@retry(times=3)`:
+1. It evaluates `retry(times=3)` first — this calls the factory and returns `decorator`.
+2. It then applies `decorator` to `fetch_score` — same as the plain decorator case.
+3. `fetch_score` is replaced with `wrapper`.
+
+So `@retry(times=3)` is equivalent to:
+```python
+fetch_score = retry(times=3)(fetch_score)
+#                 ↑                ↑
+#          factory call     decorator call
+```
+
+This is exactly what `@app.get("/matches/{match_id}", tags=["Matches"])` does. `app.get(...)` is a method that acts as a factory — it takes the path and metadata, then returns a decorator that registers the route and wraps your function.
+
+---
+
+## Stacking Decorators
+
+You've written stacked decorators in your Pydantic validators:
+
+```python
+@field_validator("home_team", "away_team")
+@classmethod
+def normalize_team_name(cls, value):
+    return value.strip().lower()
+```
+
+Multiple decorators stack from **bottom to top**. The decorator closest to the function applies first, then the one above it.
+
+The above is equivalent to:
+
+```python
+def normalize_team_name(cls, value):
+    return value.strip().lower()
+
+normalize_team_name = classmethod(normalize_team_name)            # bottom decorator first
+normalize_team_name = field_validator("home_team", "away_team")(normalize_team_name)  # then top
+```
+
+Think of it like putting on clothes — socks before shoes. The bottom decorator goes on first (closest to the skin), the top decorator wraps over it.
+
+A clearer example to visualise the order:
+
+```python
+def decorator_A(func):
+    def wrapper(*args, **kwargs):
+        print("A: before")
+        result = func(*args, **kwargs)
+        print("A: after")
+        return result
+    return wrapper
+
+def decorator_B(func):
+    def wrapper(*args, **kwargs):
+        print("B: before")
+        result = func(*args, **kwargs)
+        print("B: after")
+        return result
+    return wrapper
+
+
+@decorator_A
+@decorator_B
+def hello():
+    print("hello!")
+
+
+hello()
+# A: before     ← A is outermost, runs first
+# B: before     ← B is next
+# hello!        ← original function
+# B: after
+# A: after
+```
+
+---
+
+## Preserving the Original Function's Identity
+
+There's a subtle problem with basic decorators that trips people up in debugging:
+
+```python
+def log_calls(func):
+    def wrapper(*args, **kwargs):
+        print(f"Calling {func.__name__}")
+        return func(*args, **kwargs)
+    return wrapper
+
+@log_calls
+def add(a, b):
+    """Add two numbers together."""
+    return a + b
+
+print(add.__name__)   # "wrapper"  ← Wrong! Should be "add"
+print(add.__doc__)    # None       ← Wrong! Should be "Add two numbers together."
+```
+
+After decoration, `add` points to `wrapper`. So its `__name__` is `"wrapper"` and its docstring is gone. This matters: debugging tools, FastAPI's route introspection, test frameworks — they all use `__name__` to identify functions. If everything shows up as "wrapper", it's confusing.
+
+Fix this with `functools.wraps`:
+
+```python
+from functools import wraps
+
+def log_calls(func):
+    @wraps(func)   # ← copies __name__, __doc__, and other metadata from func onto wrapper
+    def wrapper(*args, **kwargs):
+        print(f"Calling {func.__name__}")
+        return func(*args, **kwargs)
+    return wrapper
+
+@log_calls
+def add(a, b):
+    """Add two numbers together."""
+    return a + b
+
+print(add.__name__)   # "add"                       ✓
+print(add.__doc__)    # "Add two numbers together."  ✓
+```
+
+`@wraps(func)` is itself a decorator — applied to `wrapper`, it copies all the important metadata from `func` onto `wrapper`. **Always use `@wraps(func)` when writing your own decorators.** FastAPI and Pydantic do this internally, which is why their decorators don't break your function's identity.
+
+---
+
+## Putting It All Together: What `@app.get(...)` Really Does
+
+Now you have everything needed to fully understand your FastAPI route decorators:
+
+```python
+@app.get("/matches/{match_id}", tags=["Matches"])
+def get_match(match_id: Annotated[int, Path(ge=1)]):
+    for match in INITIAL_DATA:
+        if match.id == match_id:
+            return match
+    raise HTTPException(status_code=404, detail="Match not found")
+```
+
+Step by step when Python loads this module:
+
+**Step 1 — `app.get("/matches/{match_id}", tags=["Matches"])` is evaluated.**
+This calls a method on the FastAPI `app` object. It records the path pattern and tags, then returns a decorator function.
+
+**Step 2 — That decorator is applied to `get_match`.**
+The decorator reads `get_match`'s type annotations (via Python's `inspect` module), builds the validation/injection machinery, registers the route in FastAPI's internal router, and returns a wrapped version of `get_match`.
+
+**Step 3 — `get_match` is replaced with the wrapped version.**
+The name `get_match` in your module now points to the wrapped function.
+
+This happens **once**, at startup. Every request to `GET /matches/{match_id}` calls the wrapped function, which handles parameter extraction and validation before calling your original logic.
+
+---
+
+## A Complete Custom Decorator Example
+
+To cement everything, here's a decorator that checks whether a match ID is positive before the route function runs — similar to what FastAPI's `Path(ge=1)` does internally, but written by hand:
+
+```python
+from functools import wraps
+
+def require_positive_id(func):
+    @wraps(func)
+    def wrapper(match_id, *args, **kwargs):
+        if match_id <= 0:
+            raise ValueError(f"match_id must be positive, got {match_id}")
+        return func(match_id, *args, **kwargs)
+    return wrapper
+
+
+@require_positive_id
+def get_match_by_id(match_id):
+    for match in INITIAL_DATA:
+        if match.id == match_id:
+            return match
+    return None
+
+
+print(get_match_by_id(3))    # returns the match
+get_match_by_id(-1)          # ValueError: match_id must be positive, got -1
+```
+
+---
+
+## Key Takeaways
+
+- In Python, functions are objects — they can be stored in variables, passed as arguments, and returned from other functions.
+- A **decorator** is a function that takes a function and returns a (usually modified) function.
+- `@decorator` above a function definition is shorthand for `func = decorator(func)`. It runs at module load time, not at call time.
+- Inside a decorator, `wrapper(*args, **kwargs)` captures all arguments and passes them through to the original function with `func(*args, **kwargs)`.
+- An inner function that references variables from its enclosing scope is a **closure** — those variables stay alive as long as the inner function does.
+- Decorators that take arguments (like `@app.get("/path")`) are **decorator factories** — the outer call returns a decorator, which is then applied to the function.
+- Multiple decorators stack bottom-up — the one closest to the function applies first.
+- Always use `@functools.wraps(func)` in your own decorators to preserve function name, docstring, and other metadata.

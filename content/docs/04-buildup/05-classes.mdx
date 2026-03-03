@@ -1,0 +1,436 @@
+---
+title: Classes & Objects
+description: Every Pydantic model and every Enum you've written is a class. Here's how Python's class system works — and why BaseModel behaves the way it does.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+# Classes & Objects
+
+Look at your API file. Almost everything in it is a class:
+
+```python
+class Sport(str, Enum):
+    football = "football"
+
+class Match(BaseModel):
+    home_team: str
+    status: Status
+
+class MatchUpdate(BaseModel):
+    venue: Optional[str] = None
+```
+
+You've been writing and using them throughout the course. Let's go deeper — what a class actually is, what `self` means, how inheritance works, and why `BaseModel` gives you so much for free.
+
+---
+
+## What Is a Class?
+
+A **class** is a blueprint. An **instance** is a specific object built from that blueprint.
+
+Real-world analogy: a class is an architect's floor plan. Many houses can be built from the same plan, and each house is independent — decorating one doesn't affect the others.
+
+```python
+class Match:
+    def __init__(self, home_team, away_team, sport):
+        self.home_team = home_team
+        self.away_team = away_team
+        self.sport = sport
+
+    def describe(self):
+        return f"{self.home_team} vs {self.away_team} ({self.sport})"
+```
+
+Creating instances:
+
+```python
+match1 = Match("Arsenal", "Chelsea", "football")
+match2 = Match("Lakers", "Warriors", "basketball")
+
+print(match1.describe())   # Arsenal vs Chelsea (football)
+print(match2.describe())   # Lakers vs Warriors (basketball)
+print(match1.home_team)    # Arsenal
+print(match2.home_team)    # Lakers
+```
+
+Both share the `describe` method. Each has its own data.
+
+---
+
+## `__init__` — The Initializer
+
+`__init__` runs automatically when you create a new instance. It sets the object's starting state.
+
+```python
+class Match:
+    def __init__(self, home_team, away_team):
+        self.home_team = home_team   # store as instance data
+        self.away_team = away_team
+        self.id = None               # default value
+```
+
+When you write `Match("Arsenal", "Chelsea")`, Python calls `__init__` with the new instance as the first argument and `"Arsenal"`, `"Chelsea"` as the next two.
+
+You don't call `__init__` directly. Python calls it for you.
+
+---
+
+## `self` — The Instance Reference
+
+`self` is how a method accesses the specific instance it's operating on.
+
+```python
+class Counter:
+    def __init__(self):
+        self.count = 0
+
+    def increment(self):
+        self.count += 1
+
+    def value(self):
+        return self.count
+
+
+c1 = Counter()
+c2 = Counter()
+
+c1.increment()
+c1.increment()
+c2.increment()
+
+print(c1.value())   # 2
+print(c2.value())   # 1 ← independent from c1
+```
+
+When you write `c1.increment()`, Python translates this internally to `Counter.increment(c1)` — it passes `c1` as `self` automatically. Inside `increment`, `self.count += 1` modifies only `c1`'s count.
+
+<Callout type="info" title="Why self?">
+  The name `self` is just a convention. Python passes the instance as the first argument to every method automatically. `self` is how the method knows which specific instance to work with.
+</Callout>
+
+---
+
+## Instance Attributes vs Class Attributes
+
+Data can live in two places:
+
+```python
+class Match:
+    max_players = 11       # class attribute — shared by ALL instances
+
+    def __init__(self, home_team):
+        self.home_team = home_team   # instance attribute — unique per instance
+
+
+match1 = Match("Arsenal")
+match2 = Match("Chelsea")
+
+print(match1.max_players)   # 11  ← from the class
+print(match2.max_players)   # 11  ← same value, same source
+print(Match.max_players)    # 11  ← accessible on the class itself
+
+print(match1.home_team)     # Arsenal  ← unique to match1
+print(match2.home_team)     # Chelsea  ← unique to match2
+```
+
+**Instance attributes** (`self.x`) are independent per object. **Class attributes** are shared across all instances and accessible on the class directly.
+
+In Pydantic models, the annotations (`home_team: str`) are class-level declarations that Pydantic reads to build its validation logic. The actual values (`self.home_team = "Arsenal"`) are stored as instance attributes when you create a model instance.
+
+---
+
+## Inheritance — Getting Behaviour From a Parent
+
+A class can **inherit** from another class, automatically getting all of its methods and data. The child class can also add new methods or override existing ones.
+
+```python
+class Animal:
+    def __init__(self, name):
+        self.name = name
+
+    def describe(self):
+        return f"I am {self.name}"
+
+    def speak(self):
+        return "..."
+
+
+class Dog(Animal):      # Dog inherits from Animal
+    def speak(self):    # overrides Animal's version
+        return "Woof!"
+
+
+class Cat(Animal):
+    def speak(self):
+        return "Meow!"
+
+
+dog = Dog("Rex")
+cat = Cat("Whiskers")
+
+print(dog.name)        # Rex     ← inherited from Animal.__init__
+print(dog.describe())  # I am Rex ← inherited from Animal
+print(dog.speak())     # Woof!   ← Dog's own version
+print(cat.speak())     # Meow!   ← Cat's own version
+```
+
+`Dog` didn't define `__init__` or `describe` — it got them from `Animal` for free. It only defined `speak` to override the parent's version.
+
+### `isinstance` — checking the inheritance chain
+
+```python
+print(isinstance(dog, Dog))     # True
+print(isinstance(dog, Animal))  # True ← Dog inherits from Animal
+print(isinstance(cat, Dog))     # False
+```
+
+`isinstance` returns `True` for the object's own class and all parent classes. This is how FastAPI checks whether a return value is a Pydantic model — it checks `isinstance(result, BaseModel)`.
+
+---
+
+## How Pydantic's `BaseModel` Uses Inheritance
+
+When you write:
+
+```python
+class Match(BaseModel):
+    home_team: str
+    status: Status
+    winner: Optional[Winner] = None
+```
+
+`Match` inherits from Pydantic's `BaseModel`. You get all of this for free — without writing it yourself:
+
+| What you get | What it does |
+|-------------|-------------|
+| A smart `__init__` | Accepts keyword arguments, validates types, runs your validators |
+| `.model_dump()` | Converts the instance to a Python dict |
+| `.model_dump(mode='json')` | Converts to a JSON-serializable dict |
+| `.model_validate(data)` | Creates a validated instance from a dict |
+| `__repr__` | Makes instances print nicely with all field values |
+| `__eq__` | Two instances with the same values compare as equal |
+
+Your `Match` class just adds the field declarations and any validators. Everything else comes from `BaseModel`.
+
+---
+
+## `super()` — Extending a Parent's Method
+
+When you want to add to a parent's behaviour rather than completely replace it, use `super()`:
+
+```python
+class Animal:
+    def __init__(self, name):
+        self.name = name
+
+
+class Dog(Animal):
+    def __init__(self, name, breed):
+        super().__init__(name)   # run Animal's __init__ first
+        self.breed = breed       # then add Dog-specific setup
+
+
+dog = Dog("Rex", "Labrador")
+print(dog.name)    # Rex       ← set by Animal.__init__
+print(dog.breed)   # Labrador  ← set by Dog.__init__
+```
+
+Without `super().__init__(name)`, `self.name` would never be set — `Dog.__init__` would completely replace `Animal.__init__` rather than extend it.
+
+You used this pattern in custom exceptions:
+
+```python
+class MatchNotFoundError(Exception):
+    def __init__(self, match_id):
+        super().__init__(f"Match {match_id} does not exist")
+        self.match_id = match_id
+```
+
+`super().__init__(message)` calls `Exception`'s initializer — which is what makes `str(e)` and `print(e)` work correctly.
+
+---
+
+## `@classmethod` vs Regular Methods
+
+Normally, methods receive the instance (`self`) as their first argument. A `@classmethod` receives the **class itself** (`cls`) instead.
+
+```python
+class Match:
+    def __init__(self, home_team, away_team, sport):
+        self.home_team = home_team
+        self.away_team = away_team
+        self.sport = sport
+
+    @classmethod
+    def create_football_match(cls, home_team, away_team):
+        return cls(home_team, away_team, "football")   # cls() creates a new instance
+
+
+match = Match.create_football_match("Arsenal", "Chelsea")
+print(match.sport)   # football
+```
+
+Class methods are called on the class itself — `Match.create_football_match(...)` — not on an instance.
+
+Pydantic requires `@classmethod` on `@field_validator` because validators run during class setup — before a specific instance exists. At that point, there's no `self` yet, only the class `cls`.
+
+```python
+@field_validator("home_team", "away_team")
+@classmethod
+def normalize_team_name(cls, value):
+    return value.strip().lower()
+```
+
+### `@staticmethod` — just a function inside a class
+
+A `@staticmethod` gets neither `self` nor `cls`. It's a plain function that lives inside the class for organisation:
+
+```python
+class Player:
+    def __init__(self, number, name):
+        self.number = number
+        self.name = name
+
+    @staticmethod
+    def is_valid_jersey_number(n):
+        return 1 <= n <= 99
+
+
+print(Player.is_valid_jersey_number(10))   # True
+print(Player.is_valid_jersey_number(0))    # False
+```
+
+---
+
+## Multiple Inheritance — How Enums Work
+
+Python allows a class to inherit from multiple parents. Your enums use this:
+
+```python
+class Sport(str, Enum):
+    football = "football"
+    cricket  = "cricket"
+```
+
+`Sport` inherits from both `str` **and** `Enum`.
+
+Without `str`, comparing an enum member to a string would fail:
+
+```python
+class Sport(Enum):         # without str
+    football = "football"
+
+Sport.football == "football"   # False — different types!
+```
+
+With `str`, each enum member *is* a string:
+
+```python
+class Sport(str, Enum):    # with str
+    football = "football"
+
+Sport.football == "football"          # True ✅
+isinstance(Sport.football, str)       # True ✅
+print(Sport.football)                 # Sport.football
+print(Sport.football.value)           # "football"
+```
+
+This is why Pydantic can accept `"football"` from JSON and automatically convert it to `Sport.football` — it works because `Sport` inherits `str` and `Sport("football")` returns the matching member. It's also why enum fields serialize to plain strings in JSON responses.
+
+---
+
+## Dunder Methods — Python's Special Behaviour Hooks
+
+Methods with double underscores on both sides (`__init__`, `__str__`, etc.) are called **dunder methods**. Python calls them automatically in specific situations.
+
+```python
+class Match:
+    def __init__(self, home_team, away_team):
+        self.home_team = home_team
+        self.away_team = away_team
+
+    def __str__(self):
+        return f"{self.home_team} vs {self.away_team}"
+
+    def __repr__(self):
+        return f"Match(home_team={self.home_team!r}, away_team={self.away_team!r})"
+
+    def __eq__(self, other):
+        if not isinstance(other, Match):
+            return False
+        return self.home_team == other.home_team and self.away_team == other.away_team
+
+
+m = Match("Arsenal", "Chelsea")
+
+print(m)           # Arsenal vs Chelsea               ← __str__
+repr(m)            # Match(home_team='Arsenal', ...)  ← __repr__
+
+m2 = Match("Arsenal", "Chelsea")
+print(m == m2)     # True                              ← __eq__
+```
+
+| Dunder method | When Python calls it |
+|--------------|---------------------|
+| `__init__` | `Match(...)` — creating an instance |
+| `__str__` | `print(obj)`, `str(obj)` |
+| `__repr__` | REPL, `repr(obj)`, debugging |
+| `__eq__` | `obj1 == obj2` |
+| `__len__` | `len(obj)` |
+| `__getitem__` | `obj[key]` |
+
+Pydantic's `BaseModel` implements `__repr__` and `__eq__` for you — that's why printing a model instance shows all its fields, and two model instances with the same values are equal.
+
+---
+
+## Reading a Pydantic Model With Full Understanding
+
+Now you can read your `Match` model completely:
+
+```python
+class Match(BaseModel):                          # inherits from Pydantic's BaseModel
+    id: Optional[int] = None                    # class-level annotation — Pydantic reads this
+    home_team: str = Field(min_length=2)        # annotation + extra validation metadata
+
+    @field_validator("home_team", "away_team")  # Pydantic discovers and calls this validator
+    @classmethod                                # receives cls, not self — class not yet built
+    def normalize_team_name(cls, value):
+        return value.strip().lower()
+
+    @model_validator(mode="after")             # runs after all fields are set
+    def validate_match_logic(self):            # receives self — instance now exists
+        if self.home_team == self.away_team:
+            raise ValueError("Teams must be different")
+        return self                            # must return self
+```
+
+- `Match(BaseModel)` → inherits `__init__`, validation, serialization
+- Field annotations → Pydantic reads at class definition time to build field rules
+- `@classmethod` on validators → required because validation happens before an instance exists
+- `@model_validator(mode="after")` → receives `self` because all fields are already set
+
+---
+
+## Summary
+
+| Concept | What it means |
+|---------|--------------|
+| Class | A blueprint for creating objects |
+| Instance | A specific object created from a class (`Match(...)`) |
+| `__init__` | Runs automatically when an instance is created |
+| `self` | The specific instance being operated on |
+| Instance attribute | `self.x = value` — unique per object |
+| Class attribute | Defined on the class — shared by all instances |
+| Inheritance | `class Child(Parent)` — Child gets all Parent methods and data |
+| `super()` | Call the parent class's method from within the child |
+| `@classmethod` | Receives `cls` (the class) instead of `self` |
+| `@staticmethod` | Receives neither — a plain function inside a class |
+| Multiple inheritance | `class Sport(str, Enum)` — inherit from both |
+| Dunder methods | `__init__`, `__str__`, `__eq__` — Python calls automatically |
+
+---
+
+## What's Next
+
+You now understand the class system that powers Pydantic models and Enums. The next lesson covers JSON and serialization — what actually happens when your route function returns a `Match` object and FastAPI sends it back as a JSON response.

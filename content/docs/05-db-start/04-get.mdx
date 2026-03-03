@@ -1,0 +1,297 @@
+---
+title: GET Routes — Reading from the Database
+description: Replace INITIAL_DATA lookups with real SQLAlchemy queries. Inject a session, fetch by ID, and query the full list with filters, sorting, and pagination.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+# GET Routes — Reading from the Database
+
+Reading is the right place to start — no writes, no commits, just queries. Two things change in every route: add a `db` session parameter, and replace list operations with SQLAlchemy calls.
+
+---
+
+## Step 1 — Update the Imports
+
+At the top of `app/routes/matches.py`, swap out the old imports:
+
+```diff title="app/routes/matches.py"
+  from datetime import date as dt_date
+  from typing import Annotated, List
+
+  from fastapi import APIRouter, Body, Depends, HTTPException, Path, status
++ from sqlalchemy import select, func
++ from sqlalchemy.orm import Session
+
+- from app.database import INITIAL_DATA
++ from app.database import get_db
++ from app.db_models import MatchModel
+  from app.models import (
+      DateRangeFilters,
+      Match,
+      MatchFilters,
+      MatchListResponse,
+      MatchResponse,
+      MatchUpdate,
+      PaginationParams,
+      SortParams,
+      Status,
+      TeamFilter,
+      Winner,
+  )
+```
+
+`get_db` replaces `INITIAL_DATA` as the source of data. `MatchModel` is the SQLAlchemy table class. `select` builds SELECT queries. `Session` is just for the type annotation on `db`.
+
+---
+
+## Step 2 — Update `get_match` (GET by ID)
+
+### Before
+
+```python title="Before — list scan"
+@router.get("/{match_id}", response_model=MatchResponse, response_model_exclude_none=True)
+def get_match(match_id: Annotated[int, Path(ge=1, title="Match ID")]):
+    for match in INITIAL_DATA:
+        if match.id == match_id:
+            return match
+    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Match not found")
+```
+
+### After
+
+```python title="After — database lookup"
+@router.get("/{match_id}", response_model=MatchResponse, response_model_exclude_none=True)
+def get_match(
+    match_id: Annotated[int, Path(ge=1, title="Match ID")],
+    db: Annotated[Session, Depends(get_db)],  # !mark
+):
+    match = db.get(MatchModel, match_id)  # !mark
+    if match is None:                     # !mark
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Match not found")
+    return match
+```
+
+Two changes:
+1. Added `db: Annotated[Session, Depends(get_db)]` — FastAPI opens a session and injects it
+2. Replaced the `for` loop with `db.get(MatchModel, match_id)`
+
+### What `db.get()` does
+
+`db.get(MatchModel, match_id)` fetches a row by primary key. It runs:
+
+```sql
+SELECT * FROM matches WHERE id = 3
+```
+
+Returns a `MatchModel` instance if found, `None` if not. One line instead of a loop.
+
+<Callout type="info" title="Returning MatchModel when response_model expects MatchResponse">
+  Your route has `response_model=MatchResponse`, but `db.get()` returns a `MatchModel`. FastAPI handles this the same way it always did — it calls `MatchResponse.model_validate(match)`, which reads the attributes off the `MatchModel` object (`match.home_team`, `match.status`, etc.) and builds a `MatchResponse`. It works because the field names match.
+</Callout>
+
+---
+
+## Step 3 — Update `list_matches` (GET all with filters)
+
+This route had a long chain of Python list comprehensions. We replace them with SQLAlchemy query clauses — the same filtering logic, but executed inside the database.
+
+### Before
+
+```python title="Before — Python filtering"
+def list_matches(filters, date_range, pagination, sort_params):
+    results = INITIAL_DATA
+
+    if filters.sport:
+        results = [m for m in results if m.sport == filters.sport]
+    if filters.status:
+        results = [m for m in results if m.status == filters.status]
+    # ... more comprehensions ...
+
+    total = len(results)
+    results = results[pagination.offset : pagination.offset + pagination.limit]
+    return {"total": total, "matches": results, ...}
+```
+
+### After
+
+```python title="After — database queries"
+@router.get("", response_model=MatchListResponse, response_model_exclude_none=True)
+def list_matches(
+    filters: Annotated[MatchFilters, Depends()],
+    date_range: Annotated[DateRangeFilters, Depends()],
+    pagination: Annotated[PaginationParams, Depends()],
+    sort_params: Annotated[SortParams, Depends()],
+    db: Annotated[Session, Depends(get_db)],  # !mark
+):
+    # Start with "SELECT * FROM matches"
+    query = select(MatchModel)  # !mark
+
+    # Add WHERE clauses for each active filter
+    if filters.sport:
+        query = query.where(MatchModel.sport == filters.sport.value)  # !mark
+    if filters.status:
+        query = query.where(MatchModel.status == filters.status.value)  # !mark
+    if filters.winner:
+        query = query.where(MatchModel.winner == filters.winner.value)  # !mark
+    if filters.team:
+        query = query.where(
+            (MatchModel.home_team.contains(filters.team)) |   # !mark
+            (MatchModel.away_team.contains(filters.team))     # !mark
+        )
+    if filters.team_filter and filters.team:
+        if filters.team_filter == TeamFilter.won:
+            query = query.where(
+                ((MatchModel.winner == Winner.home_team.value) & (MatchModel.home_team.contains(filters.team))) |
+                ((MatchModel.winner == Winner.away_team.value) & (MatchModel.away_team.contains(filters.team)))
+            )
+        elif filters.team_filter == TeamFilter.lost:
+            query = query.where(
+                ((MatchModel.winner == Winner.away_team.value) & (MatchModel.home_team.contains(filters.team))) |
+                ((MatchModel.winner == Winner.home_team.value) & (MatchModel.away_team.contains(filters.team)))
+            )
+        elif filters.team_filter == TeamFilter.draw:
+            query = query.where(
+                (MatchModel.winner == Winner.draw.value) &
+                (
+                    (MatchModel.home_team.contains(filters.team)) |
+                    (MatchModel.away_team.contains(filters.team))
+                )
+            )
+
+    # Date range
+    if date_range.from_date:
+        query = query.where(MatchModel.date >= date_range.from_date)  # !mark
+    if date_range.to_date:
+        query = query.where(MatchModel.date <= date_range.to_date)  # !mark
+
+    # Count total matching rows before pagination
+    total = db.execute(  # !mark
+        select(func.count()).select_from(query.subquery())  # !mark
+    ).scalar()  # !mark
+
+    # Sorting
+    if sort_params.sort_by:
+        sort_col = getattr(MatchModel, sort_params.sort_by)
+        if sort_params.sort_order == "desc":
+            sort_col = sort_col.desc()
+        query = query.order_by(sort_col)  # !mark
+
+    # Pagination — LIMIT and OFFSET
+    query = query.offset(pagination.offset).limit(pagination.limit)  # !mark
+
+    # Execute — get back a list of MatchModel objects
+    matches = db.execute(query).scalars().all()  # !mark
+
+    return {
+        "total": total,
+        "page": pagination.page,
+        "limit": pagination.limit,
+        "matches": matches,
+    }
+```
+
+### Understanding the query builder
+
+`select(MatchModel)` starts a query. Each method you chain adds to it — the original is never modified, each chain returns a new query object:
+
+```python
+query = select(MatchModel)
+# SELECT * FROM matches
+
+query = query.where(MatchModel.sport == "football")
+# SELECT * FROM matches WHERE sport = 'football'
+
+query = query.where(MatchModel.status == "upcoming")
+# SELECT * FROM matches WHERE sport = 'football' AND status = 'upcoming'
+
+query = query.order_by(MatchModel.date)
+# ... ORDER BY date
+
+query = query.offset(20).limit(10)
+# ... LIMIT 10 OFFSET 20
+```
+
+Every `.where()` adds another `AND` condition. SQLAlchemy builds valid SQL from the chain.
+
+### `filters.sport.value` — enum to string
+
+Your filter values are enum members (`Sport.football`). The database stores plain strings (`"football"`). `.value` extracts the string:
+
+```python
+filters.sport           # Sport.football  ← enum member
+filters.sport.value     # "football"      ← plain string the DB understands
+```
+
+### `|` and `&` for OR / AND
+
+SQLAlchemy uses `|` for OR and `&` for AND when combining column conditions:
+
+```python
+(MatchModel.home_team.contains(filters.team)) |
+(MatchModel.away_team.contains(filters.team))
+```
+
+Generates: `WHERE home_team LIKE '%arsenal%' OR away_team LIKE '%arsenal%'`
+
+Note the parentheses around each condition — required when combining with `|` or `&`.
+
+### Counting before pagination
+
+```python
+total = db.execute(
+    select(func.count()).select_from(query.subquery())
+).scalar()
+```
+
+This counts how many rows match all the filters — before slicing with LIMIT/OFFSET. The `.scalar()` at the end pulls out the single integer result.
+
+We need the pre-pagination count to return accurate `total` in `MatchListResponse`.
+
+### Executing the query
+
+```python
+matches = db.execute(query).scalars().all()
+```
+
+- `db.execute(query)` — runs the SQL
+- `.scalars()` — unwraps to just the model objects (since we selected a single model, not multiple columns)
+- `.all()` — collects everything into a Python list
+
+---
+
+## Test It
+
+The database is empty, so results will be empty — but the routes should respond correctly.
+
+**GET a match that doesn't exist:**
+```
+GET /matches/999
+→ 404  {"detail": "Match not found"}
+```
+
+**GET all matches (empty DB):**
+```
+GET /matches
+→ 200  {"total": 0, "page": 1, "limit": 20, "matches": []}
+```
+
+Both are correct. The routes are working — just no data yet. We'll add data in the POST lesson.
+
+---
+
+## What Changed
+
+| Before | After |
+|--------|-------|
+| `for match in INITIAL_DATA: if match.id == match_id` | `db.get(MatchModel, match_id)` |
+| Python list comprehensions for filtering | `query.where(MatchModel.field == value)` |
+| `sorted(results, key=...)` | `query.order_by(MatchModel.field)` |
+| `results[start:end]` | `query.offset(n).limit(n)` |
+| `len(results)` after filtering | `select(func.count()).select_from(query.subquery())` |
+
+---
+
+## What's Next
+
+GET works. Now update POST to insert new matches into the database.
