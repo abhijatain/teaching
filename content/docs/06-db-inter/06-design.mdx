@@ -1,0 +1,250 @@
+---
+title: Design Decisions — Why the Schema Is Built This Way
+description: Good database design isn't obvious. Here's the thinking behind every structural decision in our models — what alternatives existed, why they were rejected, and what problems the chosen design prevents.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+# Design Decisions — Why the Schema Is Built This Way
+
+Writing a schema is a series of decisions. For each table and each relationship, there are usually multiple possible designs — and picking the wrong one creates problems that are painful to fix later.
+
+This lesson walks through the most important design decisions in our models, explains the alternatives that were considered, and shows what problems the chosen design prevents.
+
+---
+
+## Decision 1: Why `MatchParticipant` Instead of `home_team` and `away_team` on `Match`
+
+The most intuitive design for a match would be:
+
+```python
+# Intuitive but flawed
+class Match(Base):
+    home_team_id: Mapped[int] = mapped_column(ForeignKey("teams.id"))
+    away_team_id: Mapped[int] = mapped_column(ForeignKey("teams.id"))
+    home_score: Mapped[int | None]
+    away_score: Mapped[int | None]
+```
+
+This seems obvious. A match has a home team and an away team. Why not put them directly on the match?
+
+**The problems:**
+
+**1. The column count doubles for every new attribute.** If you want to track shots on goal, you need `home_shots` and `away_shots`. Yellow cards? `home_yellow_cards` and `away_yellow_cards`. Every new stat adds two columns — one per side.
+
+**2. Querying is asymmetric.** "Give me all matches Arsenal played" becomes:
+```sql
+SELECT * FROM matches
+WHERE home_team_id = 1 OR away_team_id = 1
+```
+This is a two-column search. With `MatchParticipant`, it's always a single join:
+```sql
+SELECT * FROM match_participants WHERE team_id = 1
+```
+
+**3. It assumes a match always has exactly two teams.** Football does. But if this model were ever extended to support group stages or multi-team events, the schema would need to be redesigned from scratch.
+
+**The solution — `MatchParticipant`:**
+
+```python
+class MatchParticipant(Base):
+    __tablename__ = "match_participants"
+
+    match_id: Mapped[int] = mapped_column(ForeignKey("matches.id"))
+    team_id: Mapped[int] = mapped_column(ForeignKey("teams.id"))
+    is_home: Mapped[bool] = mapped_column(Boolean)
+    score: Mapped[int | None]
+```
+
+Each team's participation is its own row. Adding new stats is adding new columns to one table, not two. Querying a team's history is a simple single-table query.
+
+---
+
+## Decision 2: Why `is_winner` Is a `@property`, Not a Column
+
+The original model had:
+
+```python
+is_winner: Mapped[bool]   # stored in the database
+```
+
+The problem: `is_winner` can always be calculated from `score`. If you store it separately, you now have two sources of truth that can disagree:
+
+```
+match_participants row 1: score=2, is_winner=False   ← INCONSISTENT
+match_participants row 2: score=1, is_winner=True    ← INCONSISTENT
+```
+
+A bug in your update logic, a failed partial write, or a manual database edit can make these contradict each other. Which do you trust?
+
+**The solution — compute it:**
+
+```python
+@property
+def is_winner(self) -> bool | None:
+    if self.score is None:
+        return None
+    other = next(
+        (p for p in self.match.participants if p.id != self.id), None
+    )
+    if other is None or other.score is None:
+        return None
+    return self.score > other.score
+```
+
+Now there's only one source of truth: the scores. `is_winner` is derived from them, so it can never be inconsistent.
+
+**The general rule:** Never store a value that can be calculated from other stored values. This is called **derived data**, and keeping it out of the database is one of the most important principles of good schema design.
+
+<Callout type="info" title="What about draws?">
+  When both scores are equal, `self.score > other.score` returns `False` for both participants. That's correct — neither team "won" a draw. The `@property` handles this naturally without any special case.
+</Callout>
+
+---
+
+## Decision 3: Why `Season` Exists as a Separate Table
+
+You might wonder: why not just put a `year` column on `Match`?
+
+```python
+# Simpler but limited
+class Match(Base):
+    year: Mapped[int]   # which season is this?
+```
+
+The problem: a `Season` is more than just a year. It has:
+- A `start_date` and `end_date` (the Premier League season runs from August to May, crossing calendar years)
+- A reference to its `League`
+- Standings, rosters, and a collection of matches
+
+If you collapse season into just a `year` on `Match`, you lose the ability to:
+- Know the official start and end dates of a season
+- Query "all teams who were registered in the 2023/24 season"
+- Track standings per season
+
+`Season` is a proper entity with its own data and relationships. It deserves its own table.
+
+---
+
+## Decision 4: Why `TeamPlayer` Has Three Foreign Keys (Not Two)
+
+A simple player-team junction table would be:
+
+```python
+# Too simple
+class TeamPlayer(Base):
+    team_id: Mapped[int] = mapped_column(ForeignKey("teams.id"))
+    player_id: Mapped[int] = mapped_column(ForeignKey("players.id"))
+```
+
+But this can't represent: "Salah played for Liverpool in 2022 and 2023 and 2024." You'd have one row per unique player-team combination, with no way to differentiate years.
+
+And what about a player who leaves a club and returns? With just team+player, you couldn't record that they were on the roster twice.
+
+**The solution — add `season_id`:**
+
+```python
+class TeamPlayer(Base):
+    team_id: Mapped[int] = mapped_column(ForeignKey("teams.id"))
+    player_id: Mapped[int] = mapped_column(ForeignKey("players.id"))
+    season_id: Mapped[int] = mapped_column(ForeignKey("seasons.id"))
+    jersey_number: Mapped[int | None]
+```
+
+Now each row means: "This player was on this team's roster during this specific season, wearing this jersey number." The `UniqueConstraint("team_id", "player_id", "season_id")` ensures the same player can't appear twice for the same team in the same season, but can appear in multiple seasons.
+
+---
+
+## Decision 5: Why `Standing` Is a Stored Table (Not Always Calculated)
+
+Standings could theoretically be calculated entirely from match results:
+
+```python
+# Could be computed from MatchParticipant rows
+wins = count of MatchParticipant rows where team_id=X and is_winner=True
+```
+
+So why store it at all?
+
+**Performance.** Recalculating every team's standings from scratch on every request means scanning thousands of match result rows. If you're serving standings to a million users, this is expensive.
+
+**Historical records.** A season's final standings are a historical fact. Even if you later fix a match result (due to a VAR review, etc.), you might want to keep the official published standings as they were.
+
+**Ease of querying.** `SELECT * FROM standings WHERE season_id=1 ORDER BY points DESC` is instant. The calculated equivalent requires multiple joins and aggregations.
+
+This is one of the few cases where storing derived data is the right tradeoff — the query savings are significant enough to justify keeping the standings in sync with match results.
+
+---
+
+## Decision 6: Why `PlayerMatchStat` Is Separate From `MatchParticipant`
+
+You could store player stats on the `MatchParticipant` row:
+
+```python
+# Storing stats at the team level
+class MatchParticipant(Base):
+    team_id: ...
+    score: ...
+    player_goals: ...   # doesn't make sense — which player?
+```
+
+That obviously doesn't work. But you might think: "put them on a per-player participation row that also tracks which team they were playing for." The reason they're separate is **separation of concerns**:
+
+- `MatchParticipant` answers: "Which teams played in this match, and what was the result?"
+- `PlayerMatchStat` answers: "What did each individual player do in this match?"
+
+These are different questions. Mixing them would mean every query about match results would also need to handle player-level data, and vice versa. Keeping them separate keeps each table focused and queries simpler.
+
+---
+
+## Decision 7: Why `League` and `Season` Are Not Merged
+
+```python
+# Merged — looks simpler
+class LeagueSeason(Base):
+    name: Mapped[str]          # "Premier League"
+    country: Mapped[str]       # "England"
+    year: Mapped[int]          # 2024
+    start_date: Mapped[dt_date]
+    end_date: Mapped[dt_date]
+```
+
+Problem: now every row repeats "Premier League" and "England". If the league name changes, you update hundreds of rows. If you want to list all leagues independent of seasons, you're filtering for distinct `name` values — fragile and awkward.
+
+**The rule:** Things that exist independently should be their own table. A `League` exists whether or not any season has been played. A `Season` only makes sense in the context of a `League`, but it has its own start/end dates and state. Separate tables is the correct model.
+
+---
+
+## The Design Principles Behind These Decisions
+
+Looking across all seven decisions, a few underlying principles emerge:
+
+**1. Don't duplicate data.** If the same information appears in two places, they can become inconsistent. Pick one place and reference it from everywhere else (foreign keys).
+
+**2. Don't store what you can compute — unless the computation is expensive.** `is_winner` is cheap to compute from scores, so don't store it. Standings are expensive to compute from matches, so store them.
+
+**3. Every entity with its own data and lifecycle deserves its own table.** `Season` isn't just a field on `Match` — it has dates, belongs to a league, and has its own collection of related data.
+
+**4. Design for the queries you'll run most often.** "What matches did Arsenal play?" should be a simple query. The `MatchParticipant` design makes this a single-table lookup. The alternative (home/away columns on Match) would require an OR condition every time.
+
+**5. Put extra state on the relationship, not on the entity.** `jersey_number` and `is_home` describe relationships, not entities. They go on the junction table, not on `Player` or `Team`.
+
+---
+
+## Summary
+
+| Decision | Chosen Design | Why |
+|----------|--------------|-----|
+| Match teams | `MatchParticipant` table | Symmetric queries, extensible, avoids column doubling |
+| `is_winner` | `@property` derived from score | One source of truth, no risk of inconsistency |
+| Season | Separate table | Has own data, own lifecycle, own relationships |
+| Roster | Three-way `TeamPlayer` | Tracks per-season membership and jersey numbers |
+| Standings | Stored table | Query performance, historical record |
+| Player stats | Separate from `MatchParticipant` | Separation of concerns |
+| League/Season | Separate tables | Entities with independent existence |
+
+---
+
+## What's Next
+
+The final lesson brings everything together — a complete annotated walkthrough of every line in the models file, with full understanding of every choice.

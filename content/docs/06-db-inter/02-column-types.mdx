@@ -1,0 +1,333 @@
+---
+title: Models, Columns, and Types
+description: Every table in your database starts as a Python class. Here's how DeclarativeBase, mapped_column, and Mapped work — and how Python types map to database column types.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+# Models, Columns, and Types
+
+Every table in your database is represented by a Python class. This lesson covers the foundation: how to declare those classes, what every piece of syntax means, and how SQLAlchemy translates Python types into database columns.
+
+---
+
+## The Foundation: `DeclarativeBase`
+
+Every SQLAlchemy model file starts with this:
+
+```python
+from sqlalchemy.orm import DeclarativeBase
+
+class Base(DeclarativeBase):
+    pass
+```
+
+`DeclarativeBase` is a special class from SQLAlchemy that you subclass once to create your own `Base`. Every table class in your project will then inherit from this `Base`.
+
+Why? Because `Base` keeps a **registry** of all your tables. When you tell SQLAlchemy to create the database, it looks at everything registered in `Base` and generates the appropriate SQL to create all the tables. It also uses this registry to resolve relationships between models.
+
+```python
+# Base "knows" about all of these because they inherit from it
+class League(Base): ...
+class Team(Base): ...
+class Player(Base): ...
+```
+
+<Callout type="info" title="One Base per project">
+  You create `Base` once and import it everywhere. All your model classes inherit from the same `Base`. If you accidentally create two different `Base` classes, SQLAlchemy can't resolve relationships between the two groups.
+</Callout>
+
+---
+
+## The Anatomy of a Model Class
+
+Let's look at the simplest model in our project:
+
+```python
+class League(Base):
+    __tablename__ = "leagues"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(100))
+    country: Mapped[str] = mapped_column(String(100))
+```
+
+There are four distinct things happening here. Let's take them one at a time.
+
+### 1. `class League(Base)`
+
+`League` inherits from `Base`. This registers it with SQLAlchemy's table registry and gives it all the machinery needed to work as a database model.
+
+### 2. `__tablename__ = "leagues"`
+
+This is a **class attribute** that tells SQLAlchemy what to name the table in the database. Without it, SQLAlchemy doesn't know what to call the table and will raise an error.
+
+The convention is lowercase and plural: `leagues`, `teams`, `matches`. The class name is Python (singular, CamelCase), the table name is SQL (plural, snake_case).
+
+### 3. `Mapped[int]`
+
+`Mapped` is a generic type wrapper that tells SQLAlchemy "this is a database column with this Python type". It comes from `sqlalchemy.orm`.
+
+```python
+from sqlalchemy.orm import Mapped
+```
+
+`Mapped[int]` means: a column whose value will be a Python `int`. `Mapped[str]` means: a column whose value will be a Python `str`. SQLAlchemy uses this annotation to understand the column's type and provide proper type checking.
+
+### 4. `mapped_column(...)`
+
+`mapped_column()` is the function that actually defines the column's database properties — whether it's a primary key, its maximum length, whether it can be null, and so on.
+
+```python
+id: Mapped[int] = mapped_column(primary_key=True)
+```
+
+This says: "Create a column named `id`, of type integer, and make it the primary key."
+
+---
+
+## How Python Types Map to Database Types
+
+SQLAlchemy 2.x automatically infers the database column type from the Python type in `Mapped[...]`. You only need to add explicit types when you need extra configuration.
+
+| Python type in `Mapped[...]` | Database column type |
+|------------------------------|---------------------|
+| `int` | `INTEGER` |
+| `str` | `VARCHAR` |
+| `bool` | `BOOLEAN` |
+| `float` | `FLOAT` |
+| `dt_date` (Python's `date`) | `DATE` |
+| `datetime` | `DATETIME` |
+
+So this is perfectly valid:
+
+```python
+from datetime import date as dt_date
+
+class Season(Base):
+    __tablename__ = "seasons"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    year: Mapped[int]           # SQLAlchemy infers INTEGER
+    start_date: Mapped[dt_date] # SQLAlchemy infers DATE
+    end_date: Mapped[dt_date]   # SQLAlchemy infers DATE
+```
+
+No explicit `mapped_column()` is needed on `year`, `start_date`, or `end_date` because we don't need any extra configuration — SQLAlchemy figures out the types automatically.
+
+---
+
+## When You Do Need `mapped_column()`
+
+You need `mapped_column()` explicitly when you need to configure something beyond the basic type:
+
+### Setting length on strings
+
+```python
+name: Mapped[str] = mapped_column(String(100))
+```
+
+Plain `Mapped[str]` maps to an unbounded `VARCHAR`. If you want a maximum length (which most databases prefer), you pass `String(100)` explicitly.
+
+### Primary keys
+
+```python
+id: Mapped[int] = mapped_column(primary_key=True)
+```
+
+`primary_key=True` marks this as the table's primary key — a unique identifier for each row. SQLAlchemy also makes this auto-increment by default for integers, so you don't need to supply an `id` when inserting — the database assigns it automatically.
+
+### Nullable columns
+
+By default, `Mapped[str]` creates a **NOT NULL** column — a value is required. To make a column optional, use `str | None`:
+
+```python
+stadium: Mapped[str | None] = mapped_column(String(100), nullable=True)
+```
+
+`str | None` tells SQLAlchemy the value can be `None` (which maps to `NULL` in the database). The `nullable=True` on `mapped_column` makes this explicit to the database.
+
+### Default values
+
+```python
+goals: Mapped[int] = mapped_column(default=0)
+```
+
+`default=0` means if you insert a row without specifying `goals`, it defaults to `0`. Used in `PlayerMatchStat` so stats start at zero.
+
+---
+
+## Reading the Full `Player` Model
+
+Now let's read an entire model with full understanding:
+
+```python
+from datetime import date as dt_date
+from sqlalchemy import String
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+class Player(Base):
+    __tablename__ = "players"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    # INTEGER, auto-increments, unique per row
+
+    name: Mapped[str] = mapped_column(String(100))
+    # VARCHAR(100), required (NOT NULL)
+
+    birth_date: Mapped[dt_date]
+    # DATE, required — no mapped_column needed, type inferred
+
+    nationality: Mapped[str] = mapped_column(String(100))
+    # VARCHAR(100), required
+```
+
+Four columns. SQLAlchemy will generate:
+
+```sql
+CREATE TABLE players (
+    id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    name VARCHAR(100) NOT NULL,
+    birth_date DATE NOT NULL,
+    nationality VARCHAR(100) NOT NULL
+);
+```
+
+You wrote Python. SQLAlchemy writes SQL.
+
+---
+
+## Reading the `Team` Model — With Optional Columns
+
+```python
+class Team(Base):
+    __tablename__ = "teams"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(100))
+    city: Mapped[str] = mapped_column(String(100))
+    founded_year: Mapped[int]
+    stadium: Mapped[str | None] = mapped_column(String(100), nullable=True)
+```
+
+Notice `stadium`. Not every team has a unique home stadium (or we might not know it), so it's marked as optional with `str | None` and `nullable=True`. Every other field is required.
+
+---
+
+## The `Boolean` Column
+
+In `MatchParticipant`:
+
+```python
+is_home: Mapped[bool] = mapped_column(Boolean)
+```
+
+`bool` is in the auto-infer table, so the `Boolean` explicit type isn't strictly required here. But it's sometimes written explicitly for clarity — `Boolean` makes the intent obvious to anyone reading the code.
+
+---
+
+## Columns With Defaults: `PlayerMatchStat`
+
+```python
+class PlayerMatchStat(Base):
+    __tablename__ = "player_match_stats"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    match_id: Mapped[int] = mapped_column(ForeignKey("matches.id"))
+    player_id: Mapped[int] = mapped_column(ForeignKey("players.id"))
+
+    goals: Mapped[int] = mapped_column(default=0)
+    assists: Mapped[int] = mapped_column(default=0)
+    minutes_played: Mapped[int] = mapped_column(default=0)
+```
+
+When you add a player's stats for a match, they might not have scored any goals. Instead of requiring you to pass `goals=0` every time, `default=0` handles it automatically. This is a small but important quality-of-life feature — it prevents bugs where you forget to initialise a stat and get `NULL` instead of `0`.
+
+---
+
+## Why `id` Is on Every Table
+
+Every model has:
+
+```python
+id: Mapped[int] = mapped_column(primary_key=True)
+```
+
+The **primary key** is how the database uniquely identifies each row. Rules:
+- Every table should have one
+- Values must be unique across all rows
+- Values can never be `NULL`
+- Using an auto-incrementing integer is the most common choice
+
+When SQLAlchemy sees `primary_key=True` on an `int` column, it also marks it as `AUTOINCREMENT` — so when you insert a row without specifying an `id`, the database automatically assigns the next available integer.
+
+<Callout type="info" title="Why not use names or dates as primary keys?">
+  Natural identifiers like team names seem convenient, but they break if the name ever changes. Auto-incrementing integers are stable — once assigned, they never change — which makes them safe to reference in other tables via foreign keys.
+</Callout>
+
+---
+
+## `__table_args__` — Table-Level Constraints
+
+Some constraints apply to a combination of columns, not just a single one. These go in `__table_args__`:
+
+```python
+class TeamPlayer(Base):
+    __tablename__ = "team_players"
+
+    __table_args__ = (
+        UniqueConstraint("team_id", "player_id", "season_id", name="uq_roster_entry"),
+    )
+```
+
+`UniqueConstraint` tells the database: "No two rows can have the same combination of `team_id`, `player_id`, and `season_id`." This prevents the same player from appearing on the same team's roster twice in the same season.
+
+The `name` parameter gives the constraint a name — useful for error messages and migrations.
+
+<Callout type="warn" title="The trailing comma is required">
+  `__table_args__` must be a **tuple**, not a single item. When you have only one constraint, you must write `(UniqueConstraint(...),)` — the trailing comma makes it a tuple. Without the comma, Python treats it as `(UniqueConstraint(...))` which is just parentheses, not a tuple, and SQLAlchemy will raise an error.
+</Callout>
+
+---
+
+## Imports You Need
+
+Here's a reference for what needs to be imported and where it comes from:
+
+```python
+from datetime import date as dt_date       # Python standard library
+
+from sqlalchemy import (
+    Boolean,       # explicit Boolean type
+    ForeignKey,    # foreign key references (covered next lesson)
+    String,        # string type with optional length
+    UniqueConstraint,  # multi-column uniqueness constraint
+)
+from sqlalchemy.orm import (
+    DeclarativeBase,   # base class for all models
+    Mapped,            # type annotation wrapper
+    mapped_column,     # column definition function
+    relationship,      # relationship definition (covered next lesson)
+)
+```
+
+---
+
+## Summary
+
+| Concept | What it does |
+|---------|-------------|
+| `class Base(DeclarativeBase)` | Creates the registry all models inherit from |
+| `__tablename__` | Names the table in the database |
+| `Mapped[int]` | Declares a column with a Python type |
+| `mapped_column(primary_key=True)` | Marks the column as the primary key |
+| `mapped_column(String(100))` | Sets max length on a string column |
+| `Mapped[str \| None]` | Makes the column nullable |
+| `mapped_column(default=0)` | Sets a default value if none is provided |
+| `__table_args__` | Table-level constraints like `UniqueConstraint` |
+
+---
+
+## What's Next
+
+You now understand how individual columns work. The next lesson covers foreign keys and how SQLAlchemy connects tables together.

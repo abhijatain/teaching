@@ -1,0 +1,553 @@
+---
+title: Complex Queries — Joins, GROUP BY, and Real-World Endpoints
+description: Go beyond simple selects. Learn how to join across three and four tables, aggregate stats with GROUP BY, and build the kind of endpoints a real football app actually needs — top scorers, player career history, head-to-head records.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+# Complex Queries — Joins, GROUP BY, and Real-World Endpoints
+
+The previous lesson covered the building blocks: fetch a row, filter, paginate, load a relationship. That's enough for simple data. But real applications ask harder questions:
+
+- *Which player scored the most goals in the 2024 season?*
+- *Which teams has Raheem Sterling played for, and what were his stats for each?*
+- *What's the head-to-head record between Arsenal and Chelsea?*
+
+These questions span three or four tables, require aggregation (`SUM`, `COUNT`), and often need grouping (`GROUP BY`). This lesson builds each one step by step, explaining every new concept inline.
+
+---
+
+## Concept: What is GROUP BY?
+
+Before writing any routes, you need to understand `GROUP BY` — it's the key to most of the queries in this lesson.
+
+Imagine you have this data in `player_match_stats`:
+
+```
+player_id | team_id | goals | assists
+----------+---------+-------+--------
+1         | 10      | 2     | 1
+1         | 10      | 1     | 0
+1         | 20      | 3     | 2
+1         | 20      | 0     | 1
+```
+
+Player 1 appeared in 4 matches across 2 teams. If you want to know their **total goals per team**, you can't just `SELECT SUM(goals)` — that would add all goals together into one number. You need to group the rows by team first, then sum within each group.
+
+```sql
+SELECT team_id, SUM(goals), SUM(assists)
+FROM player_match_stats
+WHERE player_id = 1
+GROUP BY team_id
+```
+
+Result:
+```
+team_id | SUM(goals) | SUM(assists)
+--------+------------+------------
+10      | 3          | 1
+20      | 3          | 3
+```
+
+`GROUP BY team_id` means: "split the rows into buckets by team_id, then apply the aggregate function to each bucket." This is the core idea behind every query in this lesson.
+
+<Callout type="info" title="The GROUP BY rule">
+  Every column in your `SELECT` must either be inside an aggregate function (`SUM`, `COUNT`, `AVG`) or listed in the `GROUP BY` clause. If you select a column that's neither, the database doesn't know which row's value to use — and will return an error.
+</Callout>
+
+---
+
+## Concept: Joining Multiple Tables
+
+A single `.join()` links two tables. But real queries often need three or four tables joined in sequence. In SQLAlchemy, you chain `.join()` calls:
+
+```python
+select(A)
+  .join(A.relationship_to_b)   # A → B
+  .join(B.relationship_to_c)   # B → C
+```
+
+Each `.join()` builds on the previous one. SQLAlchemy uses the `ForeignKey` definitions from your models to figure out the ON conditions automatically.
+
+When you need columns from multiple tables in a single query (not model objects), you use `db.execute()` instead of `db.scalars()`, because you're selecting specific columns from different tables — not a single model.
+
+```python
+# Selecting from multiple tables → db.execute()
+rows = db.execute(
+    select(Player.name, Team.name, func.sum(PlayerMatchStat.goals))
+    .join(...)
+    .group_by(...)
+).all()
+
+# Each row is a named tuple: row.name, row.goals, etc.
+for row in rows:
+    print(row.name, row.goals)
+```
+
+With that foundation, let's build the real endpoints.
+
+---
+
+## Query 1 — Teams a Player Has Played For (With Season Info)
+
+**The question:** Given a player ID, return every team they've played for, including which season, their jersey number, and the season year.
+
+**The tables involved:**
+```
+Player → TeamPlayer → Team
+                   → Season
+```
+
+`TeamPlayer` is the junction table that records "player X was on team Y during season Z with jersey number N." To answer this question, we need to join all four tables.
+
+```python
+from fastapi import APIRouter, HTTPException
+from sqlalchemy import select
+from sqlalchemy.orm import selectinload
+from database import DbSession
+from models import Player, TeamPlayer, Team, Season
+
+router = APIRouter(prefix="/players", tags=["Players"])
+
+@router.get("/{player_id}/teams")
+def get_player_teams(player_id: int, db: DbSession):
+    """All teams a player has played for, with season info."""
+
+    # First confirm the player exists
+    player = db.get(Player, player_id)
+    if player is None:
+        raise HTTPException(404, "Player not found")
+
+    # Fetch all TeamPlayer rows for this player,
+    # eagerly loading the team and season for each one
+    roster_entries = db.scalars(
+        select(TeamPlayer)
+        .where(TeamPlayer.player_id == player_id)
+        .options(
+            selectinload(TeamPlayer.team),    # load Team for each entry
+            selectinload(TeamPlayer.season),  # load Season for each entry
+        )
+        .order_by(TeamPlayer.season_id)
+    ).all()
+
+    return {
+        "player_id": player.id,
+        "player_name": player.name,
+        "teams": [
+            {
+                "team_name": entry.team.name,
+                "team_city": entry.team.city,
+                "season_year": entry.season.year,
+                "jersey_number": entry.jersey_number,
+            }
+            for entry in roster_entries
+        ]
+    }
+```
+
+**Why `db.scalars(...).all()` with `selectinload` here, not a join?**
+
+We're fetching `TeamPlayer` objects and navigating their relationships in Python. Because `TeamPlayer` already has `.team` and `.season` relationship attributes, `selectinload` is the cleanest approach — SQLAlchemy fires three predictable queries:
+
+```sql
+-- 1. All roster entries for this player
+SELECT * FROM team_players WHERE player_id = 7
+
+-- 2. All teams referenced by those entries
+SELECT * FROM teams WHERE id IN (10, 20, 30)
+
+-- 3. All seasons referenced by those entries
+SELECT * FROM seasons WHERE id IN (1, 2, 3)
+```
+
+No manual join syntax needed. The relationships you defined in your models do the work.
+
+---
+
+## Query 2 — Goals and Assists Per Team Across a Career
+
+**The question:** Given a player ID, return every team they've played for along with their total goals and assists for that team (summed across all matches).
+
+**The tables involved:**
+```
+Player → PlayerMatchStat (goals, assists per match)
+                        → Match → MatchParticipant → Team (which team was the player on?)
+```
+
+Wait — `PlayerMatchStat` doesn't have a `team_id` directly. It has a `match_id` and a `player_id`. To know which team the player was representing in a match, we need to join to `MatchParticipant`: find the participant row for this match where the team was the player's team.
+
+This is genuinely complex. Let's build it in stages.
+
+**Stage 1 — The SQL we want:**
+```sql
+SELECT
+    teams.id          AS team_id,
+    teams.name        AS team_name,
+    SUM(pms.goals)    AS total_goals,
+    SUM(pms.assists)  AS total_assists,
+    COUNT(pms.id)     AS matches_played
+FROM player_match_stats pms
+JOIN matches            ON matches.id = pms.match_id
+JOIN match_participants ON match_participants.match_id = matches.id
+                       AND match_participants.team_id IN (
+                           SELECT team_id FROM team_players WHERE player_id = pms.player_id
+                       )
+JOIN teams              ON teams.id = match_participants.team_id
+WHERE pms.player_id = 7
+GROUP BY teams.id, teams.name
+ORDER BY total_goals DESC
+```
+
+This is complex to write as a subquery. A cleaner SQLAlchemy approach: join through `TeamPlayer` to know which team the player was registered with per season, then join that to match stats.
+
+**Stage 2 — The SQLAlchemy version:**
+
+```python
+from sqlalchemy import select, func
+from models import Player, TeamPlayer, Team, Season, PlayerMatchStat, Match
+
+@router.get("/{player_id}/stats-per-team")
+def get_player_stats_per_team(player_id: int, db: DbSession):
+    """Total goals and assists per team across a player's career."""
+
+    player = db.get(Player, player_id)
+    if player is None:
+        raise HTTPException(404, "Player not found")
+
+    # We're selecting specific columns from multiple tables,
+    # so we use db.execute() and get Row objects back (not model objects)
+    rows = db.execute(
+        select(
+            Team.id.label("team_id"),
+            Team.name.label("team_name"),
+            Season.year.label("season_year"),
+            func.sum(PlayerMatchStat.goals).label("total_goals"),
+            func.sum(PlayerMatchStat.assists).label("total_assists"),
+            func.count(PlayerMatchStat.id).label("matches_played"),
+        )
+        # Start from TeamPlayer — this tells us which team/season the player was in
+        .select_from(TeamPlayer)
+        .join(TeamPlayer.team)      # TeamPlayer → Team
+        .join(TeamPlayer.season)    # TeamPlayer → Season
+        # Join to matches that happened in that season
+        .join(Match, Match.season_id == TeamPlayer.season_id)
+        # Join to the player's stats in those matches
+        .join(
+            PlayerMatchStat,
+            (PlayerMatchStat.match_id == Match.id) &
+            (PlayerMatchStat.player_id == TeamPlayer.player_id)
+        )
+        .where(TeamPlayer.player_id == player_id)
+        .group_by(Team.id, Team.name, Season.year)
+        .order_by(Season.year, Team.name)
+    ).all()
+
+    return {
+        "player_id": player.id,
+        "player_name": player.name,
+        "career_stats": [
+            {
+                "team_id": row.team_id,
+                "team_name": row.team_name,
+                "season_year": row.season_year,
+                "total_goals": row.total_goals or 0,
+                "total_assists": row.total_assists or 0,
+                "matches_played": row.matches_played,
+            }
+            for row in rows
+        ]
+    }
+```
+
+Let's unpack the key parts:
+
+**`.select_from(TeamPlayer)`** — tells SQLAlchemy which table to start the query from. This matters when you have multiple `.join()` calls and SQLAlchemy needs to know the anchor.
+
+**`.label("column_name")`** — gives the column a name in the result. Without it, `func.sum(PlayerMatchStat.goals)` would be accessible as `row[2]` (by position). With `.label("total_goals")`, it's accessible as `row.total_goals` — much clearer.
+
+**`.join(PlayerMatchStat, condition)`** — the explicit join form. When SQLAlchemy can't infer the join condition from a relationship (because the relationship doesn't exist or you need custom conditions), you write the ON clause yourself using `&` for AND.
+
+**`.group_by(Team.id, Team.name, Season.year)`** — group results by team and season so `SUM()` adds up stats within each group.
+
+**`db.execute(...).all()`** — not `db.scalars()`, because we're selecting specific columns from multiple tables. Each `row` is a named tuple: `row.team_name`, `row.total_goals`, etc.
+
+<Callout type="info" title="Why db.execute() here?">
+  `db.scalars()` is designed for queries that return a single model (like `select(Team)`). When you `select(Team.name, Season.year, func.sum(...))` — mixing columns from multiple models — use `db.execute()`. It returns `Row` objects with named attributes for each selected column.
+</Callout>
+
+---
+
+## Query 3 — Top Scorers in a Season
+
+**The question:** Given a season ID, return the top N players ranked by goals scored, with their team name and assists too.
+
+**The tables involved:**
+```
+Season → Match → PlayerMatchStat (goals per match)
+                               → Player (name)
+Match  → MatchParticipant → Team (which team did they play for?)
+```
+
+```python
+from models import Match, PlayerMatchStat, Player, MatchParticipant, Team, Season
+
+@router.get("/top-scorers")  # on a seasons router
+def get_top_scorers(
+    season_id: int,
+    limit: int = Query(default=10, ge=1, le=50),
+    db: DbSession = ...
+):
+    """Top scorers in a season, ranked by goals."""
+
+    # Confirm the season exists
+    season = db.get(Season, season_id)
+    if season is None:
+        raise HTTPException(404, "Season not found")
+
+    rows = db.execute(
+        select(
+            Player.id.label("player_id"),
+            Player.name.label("player_name"),
+            func.sum(PlayerMatchStat.goals).label("total_goals"),
+            func.sum(PlayerMatchStat.assists).label("total_assists"),
+            func.count(PlayerMatchStat.id).label("matches_played"),
+        )
+        .select_from(PlayerMatchStat)
+        .join(PlayerMatchStat.player)           # PlayerMatchStat → Player
+        .join(PlayerMatchStat.match)            # PlayerMatchStat → Match
+        .where(Match.season_id == season_id)    # only matches in this season
+        .group_by(Player.id, Player.name)       # one row per player
+        .order_by(desc("total_goals"))          # highest scorers first
+        .limit(limit)
+    ).all()
+
+    return {
+        "season_id": season_id,
+        "season_year": season.year,
+        "top_scorers": [
+            {
+                "rank": i + 1,
+                "player_id": row.player_id,
+                "player_name": row.player_name,
+                "goals": row.total_goals or 0,
+                "assists": row.total_assists or 0,
+                "matches_played": row.matches_played,
+            }
+            for i, row in enumerate(rows)
+        ]
+    }
+```
+
+**The SQL this produces:**
+```sql
+SELECT
+    players.id          AS player_id,
+    players.name        AS player_name,
+    SUM(player_match_stats.goals)    AS total_goals,
+    SUM(player_match_stats.assists)  AS total_assists,
+    COUNT(player_match_stats.id)     AS matches_played
+FROM player_match_stats
+JOIN players ON players.id = player_match_stats.player_id
+JOIN matches ON matches.id = player_match_stats.match_id
+WHERE matches.season_id = 1
+GROUP BY players.id, players.name
+ORDER BY total_goals DESC
+LIMIT 10
+```
+
+**Reading it from the inside out:**
+1. We start with `player_match_stats` — it's the table that has the goals data
+2. We join to `players` to get the player name
+3. We join to `matches` so we can filter by `season_id`
+4. We `GROUP BY` player so we get one result row per player
+5. We `SUM()` the goals and assists within each group
+6. We `ORDER BY` goals descending — highest first
+7. We `LIMIT` to the top N
+
+**`order_by(desc("total_goals"))`** — here we're ordering by the label name `"total_goals"` as a string, which works for SQL aliases created with `.label()`. You could also write `order_by(func.sum(PlayerMatchStat.goals).desc())` for the same effect.
+
+---
+
+## Query 4 — Head-to-Head Record Between Two Teams
+
+**The question:** Given two team IDs, return all matches they've played against each other, the score for each, and the win/draw/loss summary.
+
+**The tables involved:**
+```
+Match → MatchParticipant (home team)
+      → MatchParticipant (away team)
+```
+
+The tricky part: we need to join `match_participants` **twice** — once to confirm team A played in a match, and once to confirm team B also played in that same match. In SQL this means two separate joins to the same table, which requires **aliases**.
+
+```python
+from sqlalchemy.orm import aliased
+from models import Match, MatchParticipant, Team
+
+@router.get("/head-to-head")  # on a matches router
+def get_head_to_head(
+    team_a_id: int,
+    team_b_id: int,
+    db: DbSession = ...
+):
+    """All matches between two teams, plus win/draw/loss summary."""
+
+    # Confirm both teams exist
+    team_a = db.get(Team, team_a_id)
+    team_b = db.get(Team, team_b_id)
+    if team_a is None or team_b is None:
+        raise HTTPException(404, "One or both teams not found")
+
+    # Create two aliases of MatchParticipant — one for each team's side
+    # Without aliases, SQLAlchemy wouldn't know which join is which
+    ParticipantA = aliased(MatchParticipant, name="participant_a")
+    ParticipantB = aliased(MatchParticipant, name="participant_b")
+
+    rows = db.execute(
+        select(
+            Match.id.label("match_id"),
+            Match.date,
+            Match.venue,
+            Match.status,
+            ParticipantA.is_home.label("team_a_is_home"),
+            ParticipantA.score.label("team_a_score"),
+            ParticipantB.score.label("team_b_score"),
+        )
+        .select_from(Match)
+        # Join once for team A's participation
+        .join(ParticipantA, (ParticipantA.match_id == Match.id) & (ParticipantA.team_id == team_a_id))
+        # Join again for team B's participation in the same match
+        .join(ParticipantB, (ParticipantB.match_id == Match.id) & (ParticipantB.team_id == team_b_id))
+        .where(Match.status == "finished")
+        .order_by(Match.date.desc())
+    ).all()
+
+    # Compute the summary from the rows we got back
+    team_a_wins = sum(1 for r in rows if r.team_a_score is not None and r.team_b_score is not None and r.team_a_score > r.team_b_score)
+    team_b_wins = sum(1 for r in rows if r.team_a_score is not None and r.team_b_score is not None and r.team_b_score > r.team_a_score)
+    draws       = sum(1 for r in rows if r.team_a_score is not None and r.team_b_score is not None and r.team_a_score == r.team_b_score)
+
+    return {
+        "team_a": {"id": team_a.id, "name": team_a.name},
+        "team_b": {"id": team_b.id, "name": team_b.name},
+        "summary": {
+            f"{team_a.name} wins": team_a_wins,
+            f"{team_b.name} wins": team_b_wins,
+            "draws": draws,
+            "total_matches": len(rows),
+        },
+        "matches": [
+            {
+                "match_id": row.match_id,
+                "date": row.date,
+                "venue": row.venue,
+                "score": f"{row.team_a_score} – {row.team_b_score}",
+                "result": (
+                    f"{team_a.name} win" if row.team_a_score > row.team_b_score
+                    else f"{team_b.name} win" if row.team_b_score > row.team_a_score
+                    else "Draw"
+                ) if row.team_a_score is not None else "No score",
+            }
+            for row in rows
+        ]
+    }
+```
+
+**The key concept here: `aliased()`**
+
+When you need to join the same table more than once, SQL requires different aliases for each join so it knows which instance you're referring to. `aliased(MatchParticipant, name="participant_a")` creates a separate reference to `match_participants` that SQLAlchemy treats as a distinct table in the query:
+
+```sql
+SELECT
+    matches.id,
+    matches.date,
+    matches.venue,
+    participant_a.is_home,
+    participant_a.score AS team_a_score,
+    participant_b.score AS team_b_score
+FROM matches
+JOIN match_participants AS participant_a
+    ON participant_a.match_id = matches.id AND participant_a.team_id = 1
+JOIN match_participants AS participant_b
+    ON participant_b.match_id = matches.id AND participant_b.team_id = 2
+WHERE matches.status = 'finished'
+ORDER BY matches.date DESC
+```
+
+The `AS participant_a` and `AS participant_b` are the aliases. The database can now distinguish between "team 1's row in match_participants" and "team 2's row in match_participants" even though they come from the same physical table.
+
+<Callout type="info" title="When do you need aliased()?">
+  Any time you join the same table more than once in a single query. Common cases: comparing two participants in a match, finding matches where a team played both at home AND away in the same period, or any self-referential relationship.
+</Callout>
+
+---
+
+## When to Use What: A Decision Guide
+
+By now you've seen several approaches for different situations. Here's when to reach for each:
+
+**Use `selectinload` when:**
+- You have a model object and need its related objects (navigating an existing relationship)
+- The related data lives in a table you have a `relationship()` attribute for
+- You want clean, predictable queries (one per relationship level)
+
+**Use `.join()` with `db.scalars()` when:**
+- You're filtering by a related table's column, but still want full model objects back
+- Example: "give me `Match` objects where a specific team participated"
+
+**Use `.join()` with `db.execute()` when:**
+- You're selecting columns from multiple tables in one query
+- You need aggregates (`SUM`, `COUNT`) across related tables
+- You're doing `GROUP BY`
+- The result isn't a single model — it's a mix of fields from different tables
+
+**Use `aliased()` when:**
+- You join the same table more than once in a single query
+
+---
+
+## Quick Reference: New Tools in This Lesson
+
+| Tool | What it does | When to use |
+|---|---|---|
+| `.group_by(column)` | Groups rows for aggregation | With `SUM`, `COUNT`, `AVG` across rows |
+| `.label("name")` | Names a column in the result | When selecting computed values so you can do `row.name` |
+| `.select_from(Model)` | Sets the starting table | When chaining multiple joins from a non-obvious anchor |
+| `db.execute(query).all()` | Returns `Row` named tuples | Selecting specific columns from multiple tables |
+| `aliased(Model, name)` | Creates a named alias | Joining the same table more than once |
+| `&` in join condition | SQL `AND` inside `.join()` | Combining multiple ON conditions |
+| `desc("label_name")` | Order by a labeled column | Ordering by an aggregated/labeled column |
+
+---
+
+## Common Mistakes in Complex Queries
+
+**Forgetting `.select_from()` on multi-join queries**
+
+If you chain multiple `.join()` calls and don't tell SQLAlchemy where to start, it may pick the wrong anchor table and generate incorrect SQL or an error. Always add `.select_from(StartingModel)` when the starting table isn't obvious from `select(...)`.
+
+**Using `db.scalars()` when you meant `db.execute()`**
+
+If your `select(...)` mixes columns from multiple models (`select(Player.name, Team.name, func.sum(...))`), `db.scalars()` will only return the first column of each row. Use `db.execute()` and access columns by name via their labels.
+
+**Selecting a column not in GROUP BY and not aggregated**
+
+```python
+# WRONG — venue is not in GROUP BY and not in an aggregate
+select(Player.name, Match.venue, func.sum(PlayerMatchStat.goals))
+.group_by(Player.name)
+
+# RIGHT — either add it to GROUP BY or remove it
+select(Player.name, func.sum(PlayerMatchStat.goals))
+.group_by(Player.name)
+```
+
+**Not handling None in aggregates**
+
+`func.sum()` returns `None` (not `0`) when no rows match. Always use `row.total_goals or 0` in your response to avoid returning `null` in your JSON.
+
+---
+
+## What's Next
+
+The next lesson covers **POST, PUT, and DELETE endpoints** — creating new records, updating existing ones, handling validation errors, and maintaining referential integrity when deleting rows that other tables depend on.

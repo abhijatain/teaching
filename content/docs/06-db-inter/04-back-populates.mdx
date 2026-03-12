@@ -1,0 +1,358 @@
+---
+title: Relationships and back_populates
+description: Foreign keys connect tables in the database. relationship() connects Python objects in memory. Here's how they work together, what back_populates does, and how to read every relationship in our models.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+# Relationships and `back_populates`
+
+Foreign keys live in the database. `relationship()` lives in Python. They work together to let you navigate from one object to another naturally — without writing SQL joins yourself.
+
+---
+
+## What `relationship()` Does
+
+Consider two models connected by a foreign key:
+
+```python
+class League(Base):
+    __tablename__ = "leagues"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(100))
+
+class Season(Base):
+    __tablename__ = "seasons"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    league_id: Mapped[int] = mapped_column(ForeignKey("leagues.id"))
+    year: Mapped[int]
+```
+
+Without `relationship()`, to get all seasons for a league, you'd need to write a query:
+
+```python
+seasons = session.query(Season).filter(Season.league_id == league.id).all()
+```
+
+With `relationship()`, you can just do this:
+
+```python
+league = session.get(League, 1)
+print(league.seasons)    # [<Season 2023>, <Season 2024>]
+```
+
+SQLAlchemy handles the query for you. `league.seasons` feels like a regular Python attribute but triggers a database query behind the scenes.
+
+---
+
+## Declaring a `relationship()`
+
+```python
+from sqlalchemy.orm import relationship
+
+class League(Base):
+    __tablename__ = "leagues"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(100))
+    country: Mapped[str] = mapped_column(String(100))
+
+    seasons: Mapped[list["Season"]] = relationship(back_populates="league")
+```
+
+Let's dissect this:
+
+**`seasons`** — the name of the Python attribute. You'll access it as `league.seasons`.
+
+**`Mapped[list["Season"]]`** — the type annotation. `list["Season"]` means this is a list of `Season` objects. The quotes around `"Season"` are necessary because `Season` is defined later in the file — it's a **forward reference**.
+
+**`relationship(...)`** — the SQLAlchemy function that sets up the link. SQLAlchemy looks at the `Mapped[list["Season"]]` type to figure out which table to join to.
+
+**`back_populates="league"`** — tells SQLAlchemy that on the `Season` side, the corresponding relationship is named `"league"`. This links the two sides together.
+
+---
+
+## `back_populates` — The Two-Way Link
+
+Every `relationship()` in our models has a `back_populates`. This is what makes relationships **bidirectional** — you can navigate in both directions.
+
+```python
+class League(Base):
+    seasons: Mapped[list["Season"]] = relationship(back_populates="league")
+    #                                                              ↑
+    #                               "The matching attribute on Season is named 'league'"
+
+class Season(Base):
+    league: Mapped["League"] = relationship(back_populates="seasons")
+    #                                                       ↑
+    #                         "The matching attribute on League is named 'seasons'"
+```
+
+These two `back_populates` values point at each other. SQLAlchemy uses them to treat these as two views of the same relationship.
+
+The practical result is that navigating from either direction works:
+
+```python
+league = session.get(League, 1)
+league.seasons          # [<Season 2023>, <Season 2024>]  ← League → Season
+
+season = session.get(Season, 1)
+season.league           # <League 'Premier League'>       ← Season → League
+season.league.name      # 'Premier League'
+```
+
+<Callout type="warn" title="back_populates values must match exactly">
+  If `League.seasons` has `back_populates="league"`, then `Season.league` must have `back_populates="seasons"`. The strings are the Python attribute names on the other class. A mismatch causes SQLAlchemy to raise an error at startup.
+</Callout>
+
+---
+
+## One-to-Many: `Mapped[list[...]]` vs `Mapped[...]`
+
+The type annotation tells you which direction of a one-to-many relationship you're looking at:
+
+```python
+# League → Season  (one League has MANY Seasons)
+seasons: Mapped[list["Season"]] = relationship(back_populates="league")
+#                ↑ list = "many"
+
+# Season → League  (one Season has ONE League)
+league: Mapped["League"] = relationship(back_populates="seasons")
+#              ↑ no list = "one"
+```
+
+This pattern repeats throughout all the models:
+
+- `list["X"]` → this side has **many** X objects
+- `"X"` without list → this side has **one** X object
+
+---
+
+## Reading Every Relationship in the Models
+
+Let's go through each relationship pair systematically.
+
+### League ↔ Season
+
+```python
+# League side
+seasons: Mapped[list["Season"]] = relationship(back_populates="league")
+
+# Season side
+league: Mapped["League"] = relationship(back_populates="seasons")
+```
+
+One league runs across multiple seasons (2023, 2024, 2025...). A season belongs to exactly one league.
+
+---
+
+### Season ↔ Match
+
+```python
+# Season side
+matches: Mapped[list["Match"]] = relationship(back_populates="season")
+
+# Match side
+season: Mapped["Season"] = relationship(back_populates="matches")
+```
+
+One season contains many matches. Each match belongs to one season.
+
+---
+
+### Season ↔ TeamPlayer
+
+```python
+# Season side
+team_players: Mapped[list["TeamPlayer"]] = relationship(back_populates="season")
+
+# TeamPlayer side
+season: Mapped["Season"] = relationship(back_populates="team_players")
+```
+
+One season has many roster entries. Each roster entry belongs to one season.
+
+---
+
+### Season ↔ Standing
+
+```python
+# Season side
+standings: Mapped[list["Standing"]] = relationship(back_populates="season")
+
+# Standing side
+season: Mapped["Season"] = relationship(back_populates="standings")
+```
+
+One season has a league table with many standings (one per team). Each standing belongs to one season.
+
+---
+
+### Team ↔ TeamPlayer
+
+```python
+# Team side
+players: Mapped[list["TeamPlayer"]] = relationship(back_populates="team")
+
+# TeamPlayer side
+team: Mapped["Team"] = relationship(back_populates="players")
+```
+
+One team has many roster entries across all seasons. Each roster entry belongs to one team.
+
+---
+
+### Team ↔ MatchParticipant
+
+```python
+# Team side
+match_participations: Mapped[list["MatchParticipant"]] = relationship(back_populates="team")
+
+# MatchParticipant side
+team: Mapped["Team"] = relationship(back_populates="match_participations")
+```
+
+One team participates in many matches. Each participation record belongs to one team.
+
+---
+
+### Team ↔ Standing
+
+```python
+# Team side
+standings: Mapped[list["Standing"]] = relationship(back_populates="team")
+
+# Standing side
+team: Mapped["Team"] = relationship(back_populates="standings")
+```
+
+One team has many standings (one per season it participated in). Each standing belongs to one team.
+
+---
+
+### Player ↔ TeamPlayer
+
+```python
+# Player side
+teams: Mapped[list["TeamPlayer"]] = relationship(back_populates="player")
+
+# TeamPlayer side
+player: Mapped["Player"] = relationship(back_populates="teams")
+```
+
+One player can have many roster entries (different teams, different seasons). Each roster entry belongs to one player.
+
+---
+
+### Player ↔ PlayerMatchStat
+
+```python
+# Player side
+match_stats: Mapped[list["PlayerMatchStat"]] = relationship(back_populates="player")
+
+# PlayerMatchStat side
+player: Mapped["Player"] = relationship(back_populates="match_stats")
+```
+
+One player has many match stat records over their career. Each stat record belongs to one player.
+
+---
+
+### Match ↔ MatchParticipant
+
+```python
+# Match side
+participants: Mapped[list["MatchParticipant"]] = relationship(back_populates="match")
+
+# MatchParticipant side
+match: Mapped["Match"] = relationship(back_populates="participants")
+```
+
+One match has many participants (home team, away team). Each participant record belongs to one match.
+
+---
+
+### Match ↔ PlayerMatchStat
+
+```python
+# Match side
+player_stats: Mapped[list["PlayerMatchStat"]] = relationship(back_populates="match")
+
+# PlayerMatchStat side
+match: Mapped["Match"] = relationship(back_populates="player_stats")
+```
+
+One match generates many player stat records (one per player who played). Each stat record belongs to one match.
+
+---
+
+## How SQLAlchemy Knows Which Table to Join
+
+When SQLAlchemy sees:
+
+```python
+seasons: Mapped[list["Season"]] = relationship(back_populates="league")
+```
+
+It reads `"Season"` from the type annotation, finds the `Season` class in `Base`'s registry, looks at `Season`'s columns for a `ForeignKey` pointing to `leagues`, and uses that to construct the SQL join automatically.
+
+This is why having a single `Base` for all models matters — SQLAlchemy needs to be able to look up `"Season"` in the registry.
+
+---
+
+## Lazy Loading — How Relationships Are Fetched
+
+By default, SQLAlchemy uses **lazy loading**: the related objects are not fetched from the database until you actually access the attribute.
+
+```python
+league = session.get(League, 1)
+# At this point, NO query has been run for seasons
+
+print(league.seasons)
+# NOW SQLAlchemy runs: SELECT * FROM seasons WHERE league_id = 1
+```
+
+This is convenient but can cause issues — if you access many relationships in a loop, you'll trigger many small queries. In production code you'll often use **eager loading** (`joinedload`) to load everything in one query. For now, understanding that lazy loading is the default is sufficient.
+
+---
+
+## Navigation Example: Following the Chain
+
+With relationships set up, you can follow chains of objects:
+
+```python
+league = session.get(League, 1)
+
+# League → its seasons
+for season in league.seasons:
+    print(f"Season {season.year}")
+
+    # Season → its matches
+    for match in season.matches:
+        print(f"  Match at {match.venue}")
+
+        # Match → its participants
+        for participant in match.participants:
+            print(f"    {participant.team.name}: {participant.score}")
+```
+
+Each `.` access triggers a lazy load if not already loaded. This is how ORMs make database navigation feel natural.
+
+---
+
+## Summary
+
+| Concept | What it means |
+|---------|-------------|
+| `relationship(...)` | Declares a Python-level link between two models |
+| `Mapped[list["X"]]` | This side has many X objects (one-to-many, "one" side) |
+| `Mapped["X"]` | This side has one X object (one-to-many, "many" side) |
+| `back_populates="name"` | Names the matching attribute on the other class |
+| Forward reference `"Season"` | Quotes around class names defined later in the file |
+| Lazy loading | Related objects are fetched only when you access the attribute |
+
+---
+
+## What's Next
+
+You understand one-to-many relationships. The next lesson covers many-to-many relationships — what they are, why they need a junction table, and how the models like `TeamPlayer` and `MatchParticipant` implement this pattern.

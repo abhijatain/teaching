@@ -1,0 +1,624 @@
+---
+title: Querying Your Database with FastAPI — GET Endpoints
+description: Learn every type of GET request you'll need — from fetching a single team to filtering, paginating, and navigating relationships. Every session method explained inline so you always know which one to reach for.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+# Querying Your Database with FastAPI — GET Endpoints
+
+Your models are defined. Your tables exist. Now users need to *ask* for data.
+
+This lesson covers every GET pattern you'll encounter — fetching all rows, fetching one by ID, filtering, searching, pagination, ordering, and navigating relationships. Every example uses the football league schema you already know. And every time we use a session method (`db.scalars`, `db.scalar`, `db.get`, `.first()`, `.all()`), we explain exactly what it does and why we chose it over the alternatives.
+
+---
+
+## The Setup: What You Need Before Querying
+
+Before writing any route, you need three things wired up:
+
+```python
+# database.py
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker, Session
+from typing import Annotated
+from fastapi import Depends
+
+DATABASE_URL = "sqlite:///./league.db"  # swap for PostgreSQL in production
+
+engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+SessionLocal = sessionmaker(bind=engine)
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db       # hands the session to the route function
+    finally:
+        db.close()     # closes it when the request is done, no matter what
+
+# A reusable type annotation — inject this into every route
+DbSession = Annotated[Session, Depends(get_db)]
+```
+
+```python
+# main.py
+from fastapi import FastAPI
+from database import engine
+from models import Base
+
+app = FastAPI()
+Base.metadata.create_all(bind=engine)  # creates tables if they don't exist
+```
+
+<Callout type="info" title="What is a Session?">
+  A `Session` is your temporary connection to the database for one request. You ask it to run queries, it talks to the database, gives you Python objects back, and then you close it. SQLAlchemy tracks everything that happens inside the session — what was loaded, what changed, what needs saving.
+</Callout>
+
+---
+
+## The Four Ways to Get Results Back — Explained Once, Used Everywhere
+
+Before diving into patterns, let's establish the four methods you'll see throughout this lesson. Understanding the difference now means you'll never be confused when you see them in code.
+
+```
+db.scalars(query).all()    →  list of model objects          [Team, Team, Team]
+db.scalars(query).first()  →  one model object (or None)     Team | None
+db.scalar(query)           →  one raw value (or None)        42 | "Arsenal" | None
+db.get(Model, id)          →  one model object by PK         Team | None
+db.execute(query).all()    →  list of raw Row tuples         [("Arsenal", "London"), ...]
+```
+
+**`db.scalars()` — for queries that return rows**
+
+`scalars()` runs your query and unwraps each row into the first column — which, for `select(Team)`, is the `Team` object itself. You then call `.all()` to collect every result into a list, or `.first()` to grab just the first one.
+
+```python
+# .all()   — you expect multiple results
+teams = db.scalars(select(Team)).all()
+# → [<Team id=1>, <Team id=2>, <Team id=3>]
+
+# .first() — you expect zero or one result
+team = db.scalars(select(Team).where(Team.name == "Arsenal")).first()
+# → <Team id=1>  OR  None
+```
+
+Why `.first()` instead of `.all()[0]`? Because `.first()` returns `None` gracefully when nothing matches. `.all()[0]` raises an `IndexError` if the list is empty — a runtime crash you'd only discover from a bug report.
+
+**`db.scalar()` — for queries that return a single value**
+
+When your query produces a number, a string, or any single computed value (not a row), use `db.scalar()`. It returns just that one value directly — no `.all()` or `.first()` needed.
+
+```python
+# Returns 42, not [42] and not a Row object
+count = db.scalar(select(func.count()).select_from(Team))
+# → 42
+
+# Returns a sum, or None if there are no matching rows
+total = db.scalar(select(func.sum(Standing.points)).where(...))
+# → 150  OR  None
+```
+
+**`db.get()` — the primary key shortcut**
+
+When you know the exact primary key, `db.get()` is the fastest path. SQLAlchemy checks the session's identity map first — if this object was already loaded earlier in the same request, no SQL is run at all. Only if it's not cached does it hit the database.
+
+```python
+team = db.get(Team, 1)
+# → <Team id=1>  OR  None
+```
+
+It returns `None` if no row with that ID exists. It does **not** raise an exception — you must check for `None` yourself.
+
+**`db.execute()` — for selecting specific columns**
+
+`db.execute()` is the lower-level method that `scalars()` is built on. It returns raw `Row` objects (named tuples of column values) instead of model objects. You use it when you're selecting specific columns rather than an entire model:
+
+```python
+# Selecting specific columns → db.execute(), not db.scalars()
+rows = db.execute(select(Team.name, Team.city)).all()
+# → [("Arsenal", "London"), ("Chelsea", "London"), ...]
+
+# Access by column name
+for row in rows:
+    print(row.name, row.city)
+```
+
+For selecting entire models (which is 90% of what you'll do), always prefer `db.scalars()`. Reserve `db.execute()` for when you're projecting specific columns or writing complex queries that return multiple models at once.
+
+---
+
+## Pattern 1 — Get All Rows
+
+The simplest query: return every row from a table.
+
+```python
+from fastapi import APIRouter
+from sqlalchemy import select
+from database import DbSession
+from models import Team
+
+router = APIRouter(prefix="/teams", tags=["Teams"])
+
+@router.get("/")
+def get_all_teams(db: DbSession):
+    teams = db.scalars(select(Team)).all()
+    return teams
+```
+
+We use `db.scalars(...).all()` here because we expect **multiple results** — we want every team as a Python list. `select(Team)` builds the SQL, `db.scalars()` executes it and gives us `Team` objects, and `.all()` collects them.
+
+**The SQL SQLAlchemy actually runs:**
+```sql
+SELECT teams.id, teams.name, teams.city, teams.founded_year, teams.stadium
+FROM teams
+```
+
+<Callout type="warn" title="Don't return all rows in production">
+  This returns every team in the database. For small tables that's fine. For 100,000 rows it will time out or crash your server. We fix this with pagination in Pattern 5.
+</Callout>
+
+---
+
+## Pattern 2 — Get One Row by ID
+
+The most common single-row query: fetch by primary key.
+
+```python
+from fastapi import HTTPException
+
+@router.get("/{team_id}")
+def get_team(team_id: int, db: DbSession):
+    team = db.get(Team, team_id)          # fastest path for a known primary key
+
+    if team is None:                       # db.get() returns None, never raises
+        raise HTTPException(status_code=404, detail="Team not found")
+
+    return team
+```
+
+We use `db.get(Team, team_id)` because we have the **primary key** — it's the shortest and most efficient path. If you were looking up by something else (like a unique name), you'd switch to `db.scalars(...).first()`:
+
+```python
+# No primary key? Use .first() with a .where() condition
+team = db.scalars(
+    select(Team).where(Team.name == "Arsenal")
+).first()
+# → <Team>  OR  None
+```
+
+`.first()` (not `.all()`) because we expect at most one result. `.first()` returns `None` cleanly — unlike `.all()[0]` which would crash on an empty list.
+
+**The rule for None checking:**
+
+```
+db.get(Model, id)           → None if ID doesn't exist
+db.scalars(...).first()     → None if no row matches
+db.scalar(...)              → None if the aggregate has no rows
+```
+
+All three return `None` silently. Never assume a row exists. Always check, always raise a 404.
+
+---
+
+## Pattern 3 — Filter by a Field
+
+```python
+@router.get("/by-city/{city}")
+def get_teams_by_city(city: str, db: DbSession):
+    teams = db.scalars(
+        select(Team).where(Team.city == city)
+    ).all()    # multiple teams per city — .all()
+    return teams
+```
+
+**Building conditions dynamically:**
+
+```python
+@router.get("/search")
+def search_teams(
+    city: str | None = None,
+    founded_after: int | None = None,
+    db: DbSession = ...
+):
+    query = select(Team)             # "SELECT * FROM teams" — start broad
+
+    if city:
+        query = query.where(Team.city == city)             # narrow if provided
+
+    if founded_after:
+        query = query.where(Team.founded_year > founded_after)  # narrow further
+
+    return db.scalars(query).all()   # execute whatever was built
+```
+
+This is the **build-the-query pattern**. `select(Team)` is immutable and chainable — each `.where()` returns a new query with that condition appended. You only add a filter when the user actually provided it.
+
+```
+GET /teams/search?city=London                  → WHERE city = 'London'
+GET /teams/search?founded_after=1900           → WHERE founded_year > 1900
+GET /teams/search?city=London&founded_after=1900 → both conditions
+GET /teams/search                              → no filter, returns all
+```
+
+---
+
+## Pattern 4 — Query Parameters with Validation
+
+`Query()` from FastAPI adds documentation, defaults, and automatic validation to query params.
+
+```python
+from fastapi import Query
+
+@router.get("/")
+def get_teams(
+    city: str | None = Query(default=None, description="Filter by city"),
+    name: str | None = Query(default=None, min_length=2, description="Partial name search"),
+    db: DbSession = ...
+):
+    query = select(Team)
+    if city:
+        query = query.where(Team.city == city)
+    if name:
+        query = query.where(Team.name.ilike(f"%{name}%"))
+    return db.scalars(query).all()
+```
+
+`min_length=2` means FastAPI rejects `?name=a` before your code runs — it sends a 422 Unprocessable Entity automatically. No manual validation needed.
+
+`.ilike(f"%{name}%")` is **case-insensitive partial matching**. `?name=pool` matches "Liverpool", "Blackpool", "Hartlepool". The `%` symbols are SQL wildcards meaning "anything here".
+
+```sql
+WHERE lower(teams.name) LIKE lower('%pool%')
+```
+
+---
+
+## Pattern 5 — Pagination
+
+```python
+@router.get("/")
+def get_teams(
+    skip: int = Query(default=0, ge=0, description="Records to skip"),
+    limit: int = Query(default=20, ge=1, le=100, description="Records per page"),
+    db: DbSession = ...
+):
+    teams = db.scalars(
+        select(Team).offset(skip).limit(limit)
+    ).all()
+    return teams
+```
+
+`.offset(skip)` tells the database "skip the first N rows." `.limit(limit)` says "return at most N rows." Together:
+
+```
+All teams:  [A, B, C, D, E, F, G, H, I, J]
+
+?skip=0&limit=3  →  [A, B, C]   ← page 1
+?skip=3&limit=3  →  [D, E, F]   ← page 2
+?skip=6&limit=3  →  [G, H, I]   ← page 3
+```
+
+`ge=0` (greater than or equal to 0) prevents negative skip. `le=100` (less than or equal to 100) is your safety cap — without it, someone could send `?limit=1000000` and try to load your entire database in one shot. FastAPI enforces both constraints before your function runs.
+
+---
+
+## Pattern 6 — Ordering Results
+
+```python
+from sqlalchemy import asc, desc
+
+@router.get("/")
+def get_teams(
+    order_by: str = Query(default="name", enum=["name", "founded_year", "city"]),
+    order_dir: str = Query(default="asc", enum=["asc", "desc"]),
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=20, ge=1, le=100),
+    db: DbSession = ...
+):
+    column = getattr(Team, order_by)                          # "name" → Team.name
+    direction = asc(column) if order_dir == "asc" else desc(column)
+
+    teams = db.scalars(
+        select(Team).order_by(direction).offset(skip).limit(limit)
+    ).all()
+    return teams
+```
+
+`enum=["name", "founded_year", "city"]` restricts accepted values. `?order_by=password` gets a 422 automatically. `getattr(Team, order_by)` safely converts the string `"name"` into the actual SQLAlchemy column `Team.name`.
+
+---
+
+## Pattern 7 — Load a Related Object (and Why You Need selectinload)
+
+SQLAlchemy relationships let you navigate from one object to another in Python. But there's a trap: by default, relationships are **lazy-loaded** — SQLAlchemy only fetches them when you actually access them. Inside an active session this works, but once the session closes (which `get_db()` does after the route returns), accessing a lazy relationship raises `DetachedInstanceError`.
+
+The fix is **eager loading** with `selectinload` — tell SQLAlchemy to load the relationship immediately, in the same database trip as the main query.
+
+```python
+from sqlalchemy.orm import selectinload
+
+@router.get("/{team_id}/with-standings")
+def get_team_with_standings(team_id: int, db: DbSession):
+    team = db.scalars(
+        select(Team)
+        .where(Team.id == team_id)
+        .options(selectinload(Team.standings))  # load standings NOW, not later
+    ).first()   # one team or None → .first()
+
+    if team is None:
+        raise HTTPException(status_code=404, detail="Team not found")
+
+    # team.standings is fully loaded — no extra SQL, no DetachedInstanceError
+    return {
+        "id": team.id,
+        "name": team.name,
+        "standings": [
+            {
+                "season_id": s.season_id,
+                "points": s.points,
+                "wins": s.wins,
+                "draws": s.draws,
+                "losses": s.losses,
+            }
+            for s in team.standings
+        ]
+    }
+```
+
+The SQL SQLAlchemy runs:
+
+```sql
+-- Query 1: fetch the team
+SELECT * FROM teams WHERE teams.id = 1
+
+-- Query 2: fetch ALL its standings at once (selectinload does this)
+SELECT * FROM standings WHERE standings.team_id IN (1)
+```
+
+Two queries total — always two, no matter how many standings exist. Without `selectinload`, accessing each `s` inside the loop would fire a separate query. For 10 seasons, that's 11 queries instead of 2. This is the **N+1 problem** and `selectinload` is how you avoid it.
+
+<Callout type="warn" title="The DetachedInstanceError">
+  If you access `team.standings` after `get_db()` closes the session, you'll get `DetachedInstanceError: Instance is not bound to a Session`. The fix is always `selectinload` — load what you need while the session is open.
+</Callout>
+
+---
+
+## Pattern 8 — Traverse Multiple Levels of Relationships
+
+You can chain `selectinload` to load relationships of relationships. Here we fetch a match and want the team names (through `MatchParticipant`) and the league name (through `Season → League`).
+
+```python
+from models import Match, MatchParticipant, Season
+
+@router.get("/{match_id}/full")
+def get_match_full(match_id: int, db: DbSession):
+    match = db.scalars(
+        select(Match)
+        .where(Match.id == match_id)
+        .options(
+            # "load participants, and for each participant load its team"
+            selectinload(Match.participants).selectinload(MatchParticipant.team),
+            # "load the season, and for that season load its league"
+            selectinload(Match.season).selectinload(Season.league),
+        )
+    ).first()
+
+    if match is None:
+        raise HTTPException(status_code=404, detail="Match not found")
+
+    return {
+        "id": match.id,
+        "date": match.date,
+        "venue": match.venue,
+        "status": match.status,
+        "season": {
+            "year": match.season.year,
+            "league": match.season.league.name,   # two levels deep
+        },
+        "teams": [
+            {
+                "name": p.team.name,   # also two levels deep
+                "is_home": p.is_home,
+                "score": p.score,
+            }
+            for p in match.participants
+        ]
+    }
+```
+
+SQLAlchemy fires five queries, each predictable, all upfront:
+
+```sql
+SELECT * FROM matches WHERE id = 1
+SELECT * FROM match_participants WHERE match_id IN (1)
+SELECT * FROM teams WHERE id IN (home_id, away_id)
+SELECT * FROM seasons WHERE id IN (season_id)
+SELECT * FROM leagues WHERE id IN (league_id)
+```
+
+Every piece of data is loaded before the session closes. No surprises.
+
+---
+
+## Pattern 9 — Aggregate Queries (Counts, Totals, Averages)
+
+Aggregate queries return one computed value. This is exactly when to reach for `db.scalar()` (no 's') instead of `db.scalars()`.
+
+```python
+from sqlalchemy import func
+
+@router.get("/count")
+def count_teams(db: DbSession):
+    # db.scalar() — returns 42 directly, not [42], not a Row
+    count = db.scalar(select(func.count()).select_from(Team))
+    return {"total_teams": count}
+
+
+@router.get("/{team_id}/total-points")
+def get_team_total_points(team_id: int, db: DbSession):
+    total = db.scalar(
+        select(func.sum(Standing.points))
+        .where(Standing.team_id == team_id)
+    )
+    # func.sum() returns None when no rows match — guard with "or 0"
+    return {"team_id": team_id, "total_points": total or 0}
+
+
+@router.get("/{team_id}/avg-points")
+def get_avg_points(team_id: int, db: DbSession):
+    avg = db.scalar(
+        select(func.avg(Standing.points))
+        .where(Standing.team_id == team_id)
+    )
+    return {"avg_points": round(avg, 1) if avg else 0}
+```
+
+The SQL:
+```sql
+SELECT count(*) FROM teams
+SELECT sum(standings.points) FROM standings WHERE team_id = 1
+SELECT avg(standings.points) FROM standings WHERE team_id = 1
+```
+
+Why `db.scalar()` and not `db.scalars().first()`? Both return the same value. But `db.scalar()` communicates intent — to anyone reading your code, it immediately signals "this query returns one value, not a row." Use the right tool for what the query conceptually does.
+
+---
+
+## Pattern 10 — Join Two Tables
+
+Joins are how you query across tables when you need to filter by a related table's column. The `.join()` method uses your existing `ForeignKey` definitions — you don't need to specify the join condition yourself.
+
+```python
+from models import MatchParticipant
+
+@router.get("/{team_id}/matches")
+def get_team_matches(team_id: int, db: DbSession):
+    matches = db.scalars(
+        select(Match)
+        .join(Match.participants)                     # JOIN match_participants
+        .where(MatchParticipant.team_id == team_id)   # filter by team
+        .order_by(Match.date.desc())
+    ).all()   # multiple matches → .all()
+
+    return [
+        {"id": m.id, "date": m.date, "venue": m.venue, "status": m.status}
+        for m in matches
+    ]
+```
+
+The SQL:
+```sql
+SELECT matches.*
+FROM matches
+JOIN match_participants ON match_participants.match_id = matches.id
+WHERE match_participants.team_id = 1
+ORDER BY matches.date DESC
+```
+
+Notice we still call `db.scalars()` — not `db.execute()` — so we still get `Match` objects back. The join is only used for **filtering**. The result type is still `list[Match]`.
+
+---
+
+## Putting It All Together — A Full Router
+
+```python
+# routers/teams.py
+from fastapi import APIRouter, HTTPException, Query
+from sqlalchemy import select, func, asc, desc
+from sqlalchemy.orm import selectinload
+from database import DbSession
+from models import Team, Standing
+
+router = APIRouter(prefix="/teams", tags=["Teams"])
+
+
+@router.get("/count")
+def count_teams(db: DbSession):
+    """db.scalar() → one integer directly."""
+    return {"total": db.scalar(select(func.count()).select_from(Team))}
+
+
+@router.get("/")
+def list_teams(
+    city: str | None = Query(default=None),
+    name: str | None = Query(default=None, min_length=2),
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=20, ge=1, le=100),
+    db: DbSession = ...
+):
+    """db.scalars().all() → list of Teams."""
+    query = select(Team)
+    if city:
+        query = query.where(Team.city == city)
+    if name:
+        query = query.where(Team.name.ilike(f"%{name}%"))
+    return db.scalars(query.offset(skip).limit(limit)).all()
+
+
+@router.get("/{team_id}")
+def get_team(team_id: int, db: DbSession):
+    """db.get() → fastest path when you have a primary key."""
+    team = db.get(Team, team_id)
+    if not team:
+        raise HTTPException(404, "Team not found")
+    return team
+
+
+@router.get("/{team_id}/standings")
+def get_team_standings(team_id: int, db: DbSession):
+    """db.scalars().first() + selectinload → one team with its related rows loaded."""
+    team = db.scalars(
+        select(Team)
+        .where(Team.id == team_id)
+        .options(selectinload(Team.standings).selectinload(Standing.season))
+    ).first()
+
+    if not team:
+        raise HTTPException(404, "Team not found")
+
+    return {
+        "id": team.id,
+        "name": team.name,
+        "standings": [
+            {
+                "year": s.season.year,
+                "points": s.points,
+                "wins": s.wins,
+                "draws": s.draws,
+                "losses": s.losses,
+                "matches_played": s.matches_played,
+            }
+            for s in team.standings
+        ]
+    }
+```
+
+---
+
+## Session Method Quick Reference
+
+| Method | Returns | Use when |
+|---|---|---|
+| `db.scalars(query).all()` | `list[Model]` | You expect multiple rows |
+| `db.scalars(query).first()` | `Model \| None` | You expect zero or one row |
+| `db.scalar(query)` | `int \| str \| None` | Query returns one value (count, sum, avg) |
+| `db.get(Model, id)` | `Model \| None` | You have the exact primary key |
+| `db.execute(query).all()` | `list[Row]` | Selecting specific columns, not full models |
+
+---
+
+## Common Mistakes
+
+**Using `.all()` when you meant `.first()`** — `db.scalars(...).all()` always returns a list. Even when one row matches, you get `[Team]` not `Team`. Calling `.name` on a list crashes. If you expect one row, use `.first()`.
+
+**Forgetting to check for `None`** — `db.get()`, `.first()`, and `db.scalar()` all return `None` silently when nothing matches. Always check, always raise a 404.
+
+**Accessing lazy relationships outside the session** — Any relationship you didn't load with `selectinload` will raise `DetachedInstanceError` once the session closes. Load everything you need inside the route function.
+
+**Using `db.scalar()` to fetch a model object** — `db.scalar(select(Team).where(...))` technically works (it returns the first column of the first row, which is the `Team` object). But it's misleading — `scalar()` signals "single value" to readers. Use `db.get()` or `.first()` for model objects.
+
+---
+
+## What's Next
+
+The next lesson covers **complex multi-table queries** — joining across three and four tables, `GROUP BY` for aggregating stats, and real endpoints like "top scorers in a season", "all teams a player has played for with goals per team", and "head-to-head match history between two teams."

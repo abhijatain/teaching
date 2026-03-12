@@ -1,0 +1,380 @@
+---
+title: The Complete Models File — Line by Line
+description: Every line of models.py, fully annotated. After six lessons, you now have everything you need to read this file with complete understanding.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+# The Complete Models File — Line by Line
+
+This is the final lesson in the SQLAlchemy series. You've covered databases, columns, types, foreign keys, relationships, and design decisions. Now let's read the entire `models.py` file from top to bottom with full understanding.
+
+---
+
+## Imports
+
+```python
+from datetime import date as dt_date
+```
+
+Python's standard library `date` class, aliased to `dt_date` to avoid conflicting with SQLAlchemy's own `Date` type. When you write `Mapped[dt_date]`, SQLAlchemy maps this to a `DATE` column.
+
+```python
+from sqlalchemy import Boolean, ForeignKey, Integer, String, UniqueConstraint
+```
+
+These are **SQLAlchemy Core types** used directly in column declarations:
+
+| Import | Used for |
+|--------|---------|
+| `Boolean` | Explicit boolean column (though `Mapped[bool]` would auto-infer it) |
+| `ForeignKey` | Declaring a column as a foreign key reference |
+| `Integer` | Explicit integer type (rarely needed — `Mapped[int]` auto-infers it) |
+| `String` | String type with optional length limit (`String(100)`) |
+| `UniqueConstraint` | Multi-column uniqueness rules in `__table_args__` |
+
+```python
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+```
+
+These are **SQLAlchemy ORM** components:
+
+| Import | Used for |
+|--------|---------|
+| `DeclarativeBase` | Base class for all models |
+| `Mapped` | Type annotation wrapper for columns and relationships |
+| `mapped_column` | Column definition with extra configuration |
+| `relationship` | Python-level navigation between models |
+
+---
+
+## `Base`
+
+```python
+class Base(DeclarativeBase):
+    pass
+```
+
+The registry for all models. Every model class inherits from `Base`. SQLAlchemy uses it to resolve relationship references and to generate the SQL to create all tables. It only needs to be defined once.
+
+---
+
+## `League`
+
+```python
+class League(Base):
+    __tablename__ = "leagues"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(100))
+    country: Mapped[str] = mapped_column(String(100))
+
+    seasons: Mapped[list["Season"]] = relationship(back_populates="league")
+```
+
+**`__tablename__ = "leagues"`** — the database table is named `leagues` (lowercase plural, per convention).
+
+**`id: Mapped[int] = mapped_column(primary_key=True)`** — an auto-incrementing integer primary key. Every table has one.
+
+**`name` and `country`** — `VARCHAR(100)` columns, required (NOT NULL). `String(100)` sets the max length; without it the column would be unbounded.
+
+**`seasons: Mapped[list["Season"]]`** — a one-to-many relationship. One league has many seasons. `list["Season"]` means "a list of Season objects". The quotes are a forward reference — `Season` is defined later in the file.
+
+**`relationship(back_populates="league")`** — links to the `league` attribute on `Season`. When you access `league.seasons`, SQLAlchemy runs `SELECT * FROM seasons WHERE league_id = ?`.
+
+---
+
+## `Season`
+
+```python
+class Season(Base):
+    __tablename__ = "seasons"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+
+    league_id: Mapped[int] = mapped_column(ForeignKey("leagues.id"))
+    year: Mapped[int]
+    start_date: Mapped[dt_date]
+    end_date: Mapped[dt_date]
+
+    league: Mapped["League"] = relationship(back_populates="seasons")
+    matches: Mapped[list["Match"]] = relationship(back_populates="season")
+    team_players: Mapped[list["TeamPlayer"]] = relationship(back_populates="season")
+    standings: Mapped[list["Standing"]] = relationship(back_populates="season")
+```
+
+**`league_id: Mapped[int] = mapped_column(ForeignKey("leagues.id"))`** — a foreign key column. The value must be a valid `id` from the `leagues` table. This is the "many" side of the `League → Season` one-to-many.
+
+**`year: Mapped[int]`** — no `mapped_column()` needed. SQLAlchemy infers `INTEGER` from `int`. No special configuration required.
+
+**`start_date` and `end_date: Mapped[dt_date]`** — again, no `mapped_column()`. SQLAlchemy infers `DATE` from Python's `date` type automatically.
+
+**`league: Mapped["League"]`** — the many-to-one side. No `list` wrapper because many seasons point to one league. Accessing `season.league` returns the single `League` object.
+
+**Four relationships** — `Season` is a hub. It connects to matches (what happened), team_players (who played), and standings (how teams ranked), all in the context of one league's season.
+
+---
+
+## `Team`
+
+```python
+class Team(Base):
+    __tablename__ = "teams"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+
+    name: Mapped[str] = mapped_column(String(100))
+    city: Mapped[str] = mapped_column(String(100))
+    founded_year: Mapped[int]
+    stadium: Mapped[str | None] = mapped_column(String(100), nullable=True)
+
+    players: Mapped[list["TeamPlayer"]] = relationship(back_populates="team")
+    match_participations: Mapped[list["MatchParticipant"]] = relationship(
+        back_populates="team"
+    )
+    standings: Mapped[list["Standing"]] = relationship(back_populates="team")
+```
+
+**`stadium: Mapped[str | None] = mapped_column(String(100), nullable=True)`** — the only nullable column on `Team`. `str | None` tells Python the value may be `None`; `nullable=True` tells the database to allow `NULL`. Not every team entry may have stadium information.
+
+**`players: Mapped[list["TeamPlayer"]]`** — this doesn't give you `Player` objects directly. It gives you `TeamPlayer` junction objects. To get the players, you navigate: `team.players[0].player.name`. This is intentional — the junction carries `jersey_number` and `season_id` which you'd lose with a direct link.
+
+**`match_participations`** — named `match_participations` (not just `matches`) because this is a list of `MatchParticipant` records, not `Match` records. The name makes the type clear.
+
+---
+
+## `Player`
+
+```python
+class Player(Base):
+    __tablename__ = "players"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+
+    name: Mapped[str] = mapped_column(String(100))
+    birth_date: Mapped[dt_date]
+    nationality: Mapped[str] = mapped_column(String(100))
+
+    teams: Mapped[list["TeamPlayer"]] = relationship(back_populates="player")
+    match_stats: Mapped[list["PlayerMatchStat"]] = relationship(back_populates="player")
+```
+
+**`birth_date: Mapped[dt_date]`** — a required date field. SQLAlchemy infers `DATE` automatically — no `mapped_column()` needed.
+
+**`teams: Mapped[list["TeamPlayer"]]`** — again, a list of junction objects, not `Team` objects directly. Navigate `player.teams[0].team.name` to get the team name. The junction also gives you `player.teams[0].season` and `player.teams[0].jersey_number`.
+
+---
+
+## `TeamPlayer`
+
+```python
+class TeamPlayer(Base):
+    __tablename__ = "team_players"
+
+    __table_args__ = (
+        UniqueConstraint("team_id", "player_id", "season_id", name="uq_roster_entry"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+
+    team_id: Mapped[int] = mapped_column(ForeignKey("teams.id"))
+    player_id: Mapped[int] = mapped_column(ForeignKey("players.id"))
+    season_id: Mapped[int] = mapped_column(ForeignKey("seasons.id"))
+
+    jersey_number: Mapped[int | None]
+
+    team: Mapped["Team"] = relationship(back_populates="players")
+    player: Mapped["Player"] = relationship(back_populates="teams")
+    season: Mapped["Season"] = relationship(back_populates="team_players")
+```
+
+**`__table_args__`** — a tuple of table-level constraints. The trailing comma is required to make it a tuple when there's only one item: `(UniqueConstraint(...),)`.
+
+**`UniqueConstraint("team_id", "player_id", "season_id", name="uq_roster_entry")`** — the database rejects any insert that would create a duplicate combination of team + player + season. One roster entry per player per team per season.
+
+**Three foreign keys** — this is a three-way junction table connecting `Team`, `Player`, and `Season`. Each foreign key establishes the constraint that the referenced row must exist.
+
+**`jersey_number: Mapped[int | None]`** — nullable, no `mapped_column()` needed beyond `int | None`. A player might not have a jersey number assigned yet.
+
+**Three relationships** — one back to each of the three tables it connects. This lets you navigate in any direction: `roster.team`, `roster.player`, `roster.season`.
+
+---
+
+## `Match`
+
+```python
+class Match(Base):
+    __tablename__ = "matches"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+
+    season_id: Mapped[int] = mapped_column(ForeignKey("seasons.id"))
+
+    venue: Mapped[str] = mapped_column(String(100))
+    date: Mapped[dt_date]
+    status: Mapped[str] = mapped_column(String(50))
+
+    season: Mapped["Season"] = relationship(back_populates="matches")
+    participants: Mapped[list["MatchParticipant"]] = relationship(
+        back_populates="match"
+    )
+    player_stats: Mapped[list["PlayerMatchStat"]] = relationship(back_populates="match")
+```
+
+**`status: Mapped[str] = mapped_column(String(50))`** — a free-text status field ("scheduled", "live", "finished", "postponed"). This could also be an Enum, which would provide stricter validation.
+
+**`participants`** — the two `MatchParticipant` rows for this match (home team and away team). Access the score of the home team: `match.participants[0].score` if they're home, but better: filter for the one where `is_home == True`.
+
+**`player_stats`** — all player performance data from this match, across both teams.
+
+---
+
+## `MatchParticipant`
+
+```python
+class MatchParticipant(Base):
+    __tablename__ = "match_participants"
+
+    __table_args__ = (
+        UniqueConstraint("match_id", "is_home", name="uq_match_home_side"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+
+    match_id: Mapped[int] = mapped_column(ForeignKey("matches.id"))
+    team_id: Mapped[int] = mapped_column(ForeignKey("teams.id"))
+
+    is_home: Mapped[bool] = mapped_column(Boolean)
+    score: Mapped[int | None]
+
+    @property
+    def is_winner(self) -> bool | None:
+        if self.score is None:
+            return None
+        other = next(
+            (p for p in self.match.participants if p.id != self.id), None
+        )
+        if other is None or other.score is None:
+            return None
+        return self.score > other.score
+
+    match: Mapped["Match"] = relationship(back_populates="participants")
+    team: Mapped["Team"] = relationship(back_populates="match_participations")
+```
+
+**`UniqueConstraint("match_id", "is_home")`** — at most one home team and one away team per match. The database enforces this, so it's impossible to accidentally insert two home teams.
+
+**`is_home: Mapped[bool] = mapped_column(Boolean)`** — `Boolean` is redundant here (SQLAlchemy would infer it from `bool`), but written explicitly for clarity.
+
+**`score: Mapped[int | None]`** — nullable because the score isn't known until the match is played. A scheduled match has `score = None`.
+
+**`@property is_winner`** — not stored in the database. Computed from `self.score` versus the other participant's score. Uses `next(...)` to find the other participant from `self.match.participants`. Returns `None` if either score isn't set yet, and `False` for both sides in a draw.
+
+<Callout type="info" title="Note on lazy loading in is_winner">
+  `self.match.participants` triggers a lazy load of `match.participants` if not already loaded. In a web request context where `session` is active, this works fine. If you're accessing this property outside an active session, it will raise an error. This is a known tradeoff of the lazy-loaded `@property` approach.
+</Callout>
+
+---
+
+## `PlayerMatchStat`
+
+```python
+class PlayerMatchStat(Base):
+    __tablename__ = "player_match_stats"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+
+    match_id: Mapped[int] = mapped_column(ForeignKey("matches.id"))
+    player_id: Mapped[int] = mapped_column(ForeignKey("players.id"))
+
+    goals: Mapped[int] = mapped_column(default=0)
+    assists: Mapped[int] = mapped_column(default=0)
+    minutes_played: Mapped[int] = mapped_column(default=0)
+
+    match: Mapped["Match"] = relationship(back_populates="player_stats")
+    player: Mapped["Player"] = relationship(back_populates="match_stats")
+```
+
+**`default=0` on all stat columns** — when you create a `PlayerMatchStat` row, you don't need to specify goals/assists/minutes if they're all zero. The defaults handle it. This prevents `NULL` in numeric stat columns, which would complicate aggregation queries (`SUM(goals)` treats `NULL` as zero in some databases but not all).
+
+**Two foreign keys** — this is a junction between `Match` and `Player`. Each row records one player's performance in one specific match.
+
+---
+
+## `Standing`
+
+```python
+class Standing(Base):
+    __tablename__ = "standings"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+
+    season_id: Mapped[int] = mapped_column(ForeignKey("seasons.id"))
+    team_id: Mapped[int] = mapped_column(ForeignKey("teams.id"))
+
+    matches_played: Mapped[int] = mapped_column(default=0)
+    wins: Mapped[int] = mapped_column(default=0)
+    draws: Mapped[int] = mapped_column(default=0)
+    losses: Mapped[int] = mapped_column(default=0)
+    points: Mapped[int] = mapped_column(default=0)
+
+    season: Mapped["Season"] = relationship(back_populates="standings")
+    team: Mapped["Team"] = relationship(back_populates="standings")
+```
+
+**All stat columns default to `0`** — at the start of a season, every team has played zero games and has zero points. Creating a `Standing` row for each team at season start with all defaults gives you a working league table immediately.
+
+**`points`** — typically 3 for a win, 1 for a draw, 0 for a loss. Stored here even though it could be calculated from `wins * 3 + draws`. The performance argument applies here too — computing points for a full league table from match results on every request is expensive.
+
+**Two foreign keys (season + team)** — one standing row per team per season. The combination of `season_id` and `team_id` is logically unique (though there's no `UniqueConstraint` enforcing this — adding one would be a good improvement).
+
+---
+
+## The Full Picture
+
+Here's how all the tables connect, with the relationship direction shown:
+
+```
+League
+  │  (league.seasons → list)
+  │
+Season ──────── League (season.league → single)
+  │  (season.matches → list)
+  │  (season.team_players → list)
+  │  (season.standings → list)
+  │
+  ├── Match ──────── Season (match.season → single)
+  │     │  (match.participants → list)
+  │     │  (match.player_stats → list)
+  │     │
+  │     ├── MatchParticipant ──── Match (→ single)
+  │     │         │               Team  (→ single)
+  │     │         └── is_winner (@property, derived)
+  │     │
+  │     └── PlayerMatchStat ──── Match  (→ single)
+  │                               Player (→ single)
+  │
+  ├── TeamPlayer ──── Team    (→ single)
+  │                    Player  (→ single)
+  │                    Season  (→ single)
+  │
+  └── Standing ──── Team   (→ single)
+                     Season (→ single)
+```
+
+---
+
+## Summary
+
+You've now read every line of the models file with full understanding:
+
+- Every `Mapped[int]`, `Mapped[str]`, `Mapped[dt_date]` column and what database type it becomes
+- Every `ForeignKey(...)` and the referential integrity constraint it creates
+- Every `relationship(back_populates=...)` pair and the direction of navigation it enables
+- Every `UniqueConstraint` and the data integrity rule it enforces
+- Every `default=0` and why it's on stats columns
+- Every `str | None` and `nullable=True` on optional columns
+- The `@property` on `is_winner` and why it's computed instead of stored
+- The design reasoning behind each structural choice
+
+This is a production-quality schema. The patterns you've learned here — junction tables, derived properties, separation of concerns, one-source-of-truth — apply to every database-backed application you'll build.

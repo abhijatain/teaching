@@ -1,0 +1,265 @@
+---
+title: What Is a Database and Why SQLAlchemy?
+description: Before writing a single line of SQLAlchemy, let's understand what a relational database is, why we need one, and what problem SQLAlchemy actually solves.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+# What Is a Database and Why SQLAlchemy?
+
+So far in this course you've stored your data in Python lists — `INITIAL_DATA = [...]`. That works for learning, but it has a fundamental problem: every time the server restarts, all your data disappears.
+
+A **database** solves this. It stores data permanently on disk so it survives restarts, crashes, and deployments.
+
+This lesson explains what a relational database is, how it organises data, and why we use SQLAlchemy instead of writing raw database commands ourselves.
+
+---
+
+## How a Relational Database Organises Data
+
+A relational database stores data in **tables** — just like spreadsheets.
+
+Each table has:
+- **Columns** — the fields (name, date, score)
+- **Rows** — the individual records
+
+For example, a `teams` table might look like this:
+
+```
+id | name       | city       | founded_year
+---+------------+------------+-------------
+1  | Arsenal    | London     | 1886
+2  | Chelsea    | London     | 1905
+3  | Liverpool  | Liverpool  | 1892
+```
+
+And a `matches` table might look like:
+
+```
+id | venue          | date       | status
+---+----------------+------------+--------
+1  | Anfield        | 2024-03-01 | finished
+2  | Stamford Bridge| 2024-03-08 | scheduled
+```
+
+But how do we know which teams played in which match? That's where **relationships** come in.
+
+---
+
+## Relationships Between Tables
+
+Tables can be linked to each other using **foreign keys** — a column in one table that refers to a row in another table.
+
+For example, a `match_participants` table connects matches to teams:
+
+```
+id | match_id | team_id | is_home | score
+---+----------+---------+---------+------
+1  | 1        | 3       | true    | 2
+2  | 1        | 1       | false   | 1
+```
+
+Row 1 says: "In match 1, team 3 (Liverpool) played at home and scored 2."
+Row 2 says: "In match 1, team 1 (Arsenal) played away and scored 1."
+
+`match_id` is a foreign key pointing to the `matches` table. `team_id` is a foreign key pointing to the `teams` table. This is how relational databases connect data across multiple tables.
+
+<Callout type="info" title="Why not just put everything in one table?">
+  You could put the team name directly in `matches` instead of using a foreign key. But then if Arsenal changes their name, you'd have to update every single match row. With a foreign key, you update one row in `teams` and everything else stays consistent.
+</Callout>
+
+---
+
+## What Is SQL?
+
+**SQL** (Structured Query Language) is the language used to talk to relational databases. Here's what some common operations look like:
+
+```sql
+-- Get all teams
+SELECT * FROM teams;
+
+-- Get a specific team
+SELECT * FROM teams WHERE id = 1;
+
+-- Insert a new team
+INSERT INTO teams (name, city, founded_year) VALUES ('Arsenal', 'London', 1886);
+
+-- Update a team
+UPDATE teams SET city = 'North London' WHERE id = 1;
+
+-- Delete a team
+DELETE FROM teams WHERE id = 1;
+```
+
+You could write SQL like this directly in your Python code. Python has libraries that let you send raw SQL strings to a database and get results back. But this approach has problems.
+
+---
+
+## The Problem With Raw SQL
+
+Writing raw SQL strings in Python is tedious and error-prone:
+
+```python
+# Raw SQL in Python — the hard way
+cursor.execute(
+    "INSERT INTO teams (name, city, founded_year) VALUES (?, ?, ?)",
+    (team.name, team.city, team.founded_year)
+)
+```
+
+The problems:
+
+**1. No Python type safety.** The database column types (`VARCHAR`, `INTEGER`, `DATE`) and your Python types (`str`, `int`, `date`) are completely separate. There's nothing stopping you from passing an integer where a string is expected.
+
+**2. Manual mapping.** When you read data back, you get raw tuples like `(1, "Arsenal", "London", 1886)`. You have to manually map each position to the right field.
+
+**3. SQL is just a string.** Your code editor can't autocomplete it, can't catch typos, and can't help you when you change a column name — you have to find and update every SQL string manually.
+
+**4. Security risks.** Manually building SQL strings opens the door to SQL injection attacks if you're not very careful.
+
+---
+
+## What SQLAlchemy Does
+
+SQLAlchemy is an **ORM** — Object Relational Mapper. It maps Python classes to database tables, so you work with Python objects instead of raw SQL.
+
+With SQLAlchemy, instead of this:
+
+```python
+cursor.execute("SELECT * FROM teams WHERE id = ?", (team_id,))
+row = cursor.fetchone()
+team = {"id": row[0], "name": row[1], "city": row[2]}
+```
+
+You write this:
+
+```python
+team = session.get(Team, team_id)
+print(team.name)  # "Arsenal"
+```
+
+SQLAlchemy translates your Python operations into the correct SQL behind the scenes. You're working with real Python objects — with autocomplete, type checking, and all the tools you're used to.
+
+---
+
+## The Two Layers of SQLAlchemy
+
+SQLAlchemy has two distinct layers that are worth knowing about:
+
+```
+Your Python Code
+      ↓
+┌─────────────────────┐
+│  SQLAlchemy ORM     │  ← what we use (classes, relationships, sessions)
+├─────────────────────┤
+│  SQLAlchemy Core    │  ← lower level (table definitions, raw SQL expressions)
+├─────────────────────┤
+│  Database Driver    │  ← talks to the actual database (psycopg2, aiosqlite, etc.)
+└─────────────────────┘
+      ↓
+   Database
+```
+
+We'll be working with the **ORM layer**. The Core layer exists if you ever need to write more complex queries, but the ORM handles the majority of real-world use cases.
+
+---
+
+## SQLAlchemy 1.x vs 2.x — What You're Looking At
+
+If you search for SQLAlchemy examples online, you'll find two very different styles. This matters because a lot of older tutorials use the old style.
+
+**Old style (SQLAlchemy 1.x):**
+
+```python
+class Team(Base):
+    __tablename__ = "teams"
+
+    id = Column(Integer, primary_key=True)
+    name = Column(String(100))
+```
+
+**New style (SQLAlchemy 2.x — what we use):**
+
+```python
+class Team(Base):
+    __tablename__ = "teams"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(100))
+```
+
+The new style uses Python type annotations (`Mapped[int]`) to describe columns. This gives you autocomplete and type checking that the old style couldn't provide. All the code in this course uses the new 2.x style.
+
+<Callout type="warn" title="Watch out for old tutorials">
+  When you search for help online, check which SQLAlchemy version the tutorial uses. If you see `Column(Integer, ...)` without `Mapped`, it's the old style. The concepts are the same but the syntax is different enough to cause confusion.
+</Callout>
+
+---
+
+## The Flow: From Python to Database and Back
+
+Here's what happens when you use SQLAlchemy to save and retrieve data:
+
+```
+Python object (Team instance)
+        ↓
+   SQLAlchemy ORM
+        ↓  (translates to SQL)
+INSERT INTO teams (name, city, founded_year) VALUES ('Arsenal', 'London', 1886)
+        ↓
+     Database
+        ↓  (returns rows)
+SELECT * FROM teams WHERE id = 1  →  (1, 'Arsenal', 'London', 1886)
+        ↓
+   SQLAlchemy ORM
+        ↓  (maps back to Python object)
+Team(id=1, name='Arsenal', city='London', founded_year=1886)
+```
+
+The ORM handles both directions: Python → SQL when writing, SQL → Python when reading.
+
+---
+
+## What We're Building
+
+Our database models describe a football league management system. Here's the full picture of what tables we have and how they connect:
+
+```
+League
+  └── has many Seasons
+        ├── has many Matches
+        │     ├── has many MatchParticipants (Teams in the Match)
+        │     └── has many PlayerMatchStats
+        ├── has many TeamPlayers (Roster)
+        └── has many Standings
+
+Team
+  ├── has many TeamPlayers (Roster)
+  ├── has many MatchParticipants
+  └── has many Standings
+
+Player
+  ├── has many TeamPlayers (Roster)
+  └── has many PlayerMatchStats
+```
+
+This might look complicated right now. By the end of this series of lessons, every single line of code in these models will make complete sense.
+
+---
+
+## Summary
+
+| Concept | What it means |
+|---------|--------------|
+| Relational database | Stores data in tables linked by foreign keys |
+| SQL | The language used to query and modify databases |
+| ORM | Maps Python classes to database tables |
+| SQLAlchemy | Python's most popular ORM |
+| `Mapped[int]` | SQLAlchemy 2.x annotation style — gives type safety |
+| Foreign key | A column that points to a row in another table |
+
+---
+
+## What's Next
+
+The next lesson covers the foundation of every SQLAlchemy model: `DeclarativeBase`, `mapped_column`, and how Python type annotations map to database column types.

@@ -1,0 +1,15 @@
+{
+  "title": "Database Inter",
+  "description": "Learn FastAPI by building a sports matches API from scratch, starting with strings and progressively adding type safety, validation, and filters.",
+  "pages": [
+    "01-intro",
+    "02-column-types",
+    "03-foreign-keys",
+    "04-back-populates",
+    "05-relationships",
+    "06-design",
+    "07-walkthrough",
+    "08-querying",
+    "09-complex-queries"
+  ]
+}

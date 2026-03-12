@@ -1,0 +1,291 @@
+---
+title: Relationship Types — One-to-Many, Many-to-Many, Many-to-One
+description: Not all relationships between tables are the same. Here's how to identify one-to-many, many-to-one, and many-to-many relationships, why many-to-many always needs a junction table, and how our models implement each type.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+# Relationship Types — One-to-Many, Many-to-Many, Many-to-One
+
+Relationships between tables fall into three patterns. Once you can identify which pattern you're looking at, the right database design becomes obvious.
+
+---
+
+## One-to-Many
+
+The most common relationship. One row in table A is associated with many rows in table B.
+
+**Real examples in our models:**
+- One `League` has many `Season`s
+- One `Season` has many `Match`es
+- One `Match` has many `PlayerMatchStat`s
+- One `Team` has many `Standing`s
+
+```
+League (id=1, name="Premier League")
+    ↓
+Season (id=1, league_id=1, year=2023)
+Season (id=2, league_id=1, year=2024)
+Season (id=3, league_id=1, year=2025)
+```
+
+**How to implement:** Put the foreign key on the "many" side. `Season` holds `league_id` — not the other way around.
+
+**In SQLAlchemy:**
+
+```python
+class League(Base):
+    seasons: Mapped[list["Season"]] = relationship(back_populates="league")
+    #              ↑ list = one League → MANY Seasons
+
+class Season(Base):
+    league_id: Mapped[int] = mapped_column(ForeignKey("leagues.id"))
+    league: Mapped["League"] = relationship(back_populates="seasons")
+    #              ↑ no list = MANY Seasons → ONE League
+```
+
+---
+
+## Many-to-One
+
+This is actually the **same relationship** as one-to-many — just described from the other direction.
+
+- One `Season` has many `Match`es → **one-to-many** (from Season's perspective)
+- Many `Match`es belong to one `Season` → **many-to-one** (from Match's perspective)
+
+The database structure is identical. The distinction is just about which side you're thinking from.
+
+```python
+class Match(Base):
+    season_id: Mapped[int] = mapped_column(ForeignKey("seasons.id"))
+    season: Mapped["Season"] = relationship(back_populates="matches")
+    # ↑ "many-to-one" — many Matches point to one Season
+```
+
+You can navigate in both directions thanks to `back_populates`:
+
+```python
+# One-to-many direction
+season.matches         # → [match1, match2, match3, ...]
+
+# Many-to-one direction
+match.season           # → <Season year=2024>
+match.season.year      # → 2024
+```
+
+---
+
+## Many-to-Many
+
+This is where things get interesting. A many-to-many relationship means rows in table A can be associated with many rows in table B, **and** rows in table B can be associated with many rows in table A.
+
+**Real examples:**
+- A `Player` can play for many `Team`s (over different seasons)
+- A `Team` can have many `Player`s
+- A `Team` can participate in many `Match`es
+- A `Match` involves many `Team`s
+
+You **cannot** implement this with just a foreign key column. Consider:
+
+```
+Player (id=1, name="Salah")
+Team   (id=2, name="Liverpool")
+Team   (id=3, name="Egypt National Team")
+```
+
+If you put `team_id` on `Player`, Salah can only belong to one team at a time. If you put `player_id` on `Team`, a team can only have one player. Neither works.
+
+---
+
+## The Junction Table Pattern
+
+The solution is always a **junction table** (also called an associative table or bridge table). It sits between the two tables and holds a foreign key to each:
+
+```
+players          team_players              teams
+---------        ---------------           -------
+id=1 (Salah)  →  player_id=1, team_id=2  ← id=2 (Liverpool)
+              →  player_id=1, team_id=3  ← id=3 (Egypt)
+id=2 (Mane)   →  player_id=2, team_id=2  ← id=2 (Liverpool)
+```
+
+Each row in `team_players` represents **one specific association** between a player and a team. A player can appear multiple times (once per team), and a team can appear multiple times (once per player).
+
+This is exactly what `TeamPlayer` does in our models:
+
+```python
+class TeamPlayer(Base):
+    __tablename__ = "team_players"
+
+    __table_args__ = (
+        UniqueConstraint("team_id", "player_id", "season_id", name="uq_roster_entry"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+
+    team_id: Mapped[int] = mapped_column(ForeignKey("teams.id"))
+    player_id: Mapped[int] = mapped_column(ForeignKey("players.id"))
+    season_id: Mapped[int] = mapped_column(ForeignKey("seasons.id"))
+
+    jersey_number: Mapped[int | None]
+
+    team: Mapped["Team"] = relationship(back_populates="players")
+    player: Mapped["Player"] = relationship(back_populates="teams")
+    season: Mapped["Season"] = relationship(back_populates="team_players")
+```
+
+### What makes `TeamPlayer` more than a simple junction table
+
+A plain many-to-many junction table just has two foreign key columns. `TeamPlayer` has three, plus extra data (`jersey_number`). This is called an **enriched junction table** — it carries additional information about the association itself.
+
+`jersey_number` doesn't belong on `Player` (same player, different number at different clubs) or on `Team` (different players use the same number over the years). It belongs on the **association** itself — which is `TeamPlayer`.
+
+<Callout type="info" title="When to use an enriched junction table">
+  If the association itself has data (a date, a number, a status), model it as a full class with a junction table. If the association has no extra data at all, SQLAlchemy has a shortcut called a secondary table — but in real applications, associations almost always end up needing extra data, so explicit junction tables are almost always the right choice.
+</Callout>
+
+---
+
+## `MatchParticipant` — Another Many-to-Many
+
+`Match` and `Team` are also many-to-many:
+
+- A match involves multiple teams (home and away)
+- A team participates in many matches
+
+```python
+class MatchParticipant(Base):
+    __tablename__ = "match_participants"
+
+    __table_args__ = (
+        UniqueConstraint("match_id", "is_home", name="uq_match_home_side"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    match_id: Mapped[int] = mapped_column(ForeignKey("matches.id"))
+    team_id: Mapped[int] = mapped_column(ForeignKey("teams.id"))
+
+    is_home: Mapped[bool] = mapped_column(Boolean)
+    score: Mapped[int | None]
+
+    match: Mapped["Match"] = relationship(back_populates="participants")
+    team: Mapped["Team"] = relationship(back_populates="match_participations")
+```
+
+Again, the junction table carries rich data: `is_home` and `score`. These values describe the **participation** — they don't belong on `Match` (both teams' scores would need columns) or on `Team` (a team's score changes per match).
+
+The `UniqueConstraint("match_id", "is_home")` prevents the accidental insertion of two home teams or two away teams for the same match — the database enforces the rule that each match has exactly one home and one away participant.
+
+---
+
+## `PlayerMatchStat` — A Three-Way Association
+
+`PlayerMatchStat` links three entities: a `Player`, a `Match`, and implicitly the context of their performance together.
+
+```python
+class PlayerMatchStat(Base):
+    __tablename__ = "player_match_stats"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    match_id: Mapped[int] = mapped_column(ForeignKey("matches.id"))
+    player_id: Mapped[int] = mapped_column(ForeignKey("players.id"))
+
+    goals: Mapped[int] = mapped_column(default=0)
+    assists: Mapped[int] = mapped_column(default=0)
+    minutes_played: Mapped[int] = mapped_column(default=0)
+```
+
+The stat values (`goals`, `assists`, `minutes_played`) only make sense in the context of **a specific player in a specific match**. They can't live on `Player` alone (different values per match) or on `Match` alone (different values per player).
+
+---
+
+## Navigating Many-to-Many Relationships
+
+With the junction table approach, navigation goes through the junction:
+
+```python
+player = session.get(Player, 1)
+
+# Player → their TeamPlayer records → the Team from each
+for roster_entry in player.teams:
+    print(roster_entry.team.name)        # Team name
+    print(roster_entry.season.year)      # Which season
+    print(roster_entry.jersey_number)    # Jersey number
+
+team = session.get(Team, 2)
+
+# Team → their TeamPlayer records → the Player from each
+for roster_entry in team.players:
+    print(roster_entry.player.name)
+    print(roster_entry.jersey_number)
+```
+
+It's one extra step compared to a direct relationship, but you also get access to the junction's own data (`jersey_number`).
+
+---
+
+## Comparing the Three Patterns
+
+```
+ONE-TO-MANY
+-----------
+League ──────────────── Season
+ id=1      FK: league_id=1 in Season
+
+"One League, many Seasons. FK goes on Season."
+
+
+MANY-TO-ONE (same as above, different perspective)
+------------------
+Match ─────────────── Season
+FK: season_id in Match   id=2
+
+"Many Matches, one Season. FK goes on Match."
+
+
+MANY-TO-MANY
+------------
+Player ──── TeamPlayer ──── Team
+ id=1     player_id=1        id=2
+          team_id=2
+
+"Player and Team each have many of each other.
+ Junction table TeamPlayer sits between them."
+```
+
+---
+
+## Why Not Just Use SQLAlchemy's Built-In `secondary`?
+
+SQLAlchemy supports a shortcut for pure many-to-many relationships using a `secondary` table:
+
+```python
+# SQLAlchemy shortcut — skip this in our case
+class Player(Base):
+    teams: Mapped[list["Team"]] = relationship(secondary="team_players")
+```
+
+This lets you access `player.teams` directly as a list of `Team` objects, skipping the junction entirely. Sounds nice — but there's a catch: **you lose access to the junction's data.**
+
+With `secondary`, you can't access `jersey_number` or `season_id` from the junction row. Since our junction tables all carry meaningful data, we use explicit junction table classes instead.
+
+<Callout type="info" title="Rule of thumb">
+  If the junction table has any columns beyond the two foreign keys, model it as a full class and navigate through it explicitly. If it's truly just two foreign keys with no extra data, `secondary` is acceptable.
+</Callout>
+
+---
+
+## Summary of Relationship Patterns
+
+| Pattern | Example | FK Location | SQLAlchemy |
+|---------|---------|-------------|-----------|
+| One-to-many | League → Seasons | FK on Season | `Mapped[list["Season"]]` on League |
+| Many-to-one | Match → Season | FK on Match | `Mapped["Season"]` on Match |
+| Many-to-many | Player ↔ Team | Junction table `TeamPlayer` | Navigate through junction |
+| Enriched junction | TeamPlayer | Has FK to both + extra data | Full model class |
+
+---
+
+## What's Next
+
+You now understand all three relationship types and how our models implement them. The next lesson covers why we made specific design decisions — why certain tables exist the way they do, and what alternatives were considered and rejected.
